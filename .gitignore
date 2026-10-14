@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+sessions/
+data/
+logs/
+*.session*
+*.sqlite*
+*.db*
+*.bak
+*.backup
+*.challenger.lock
+*.coordinator.lock
+.venv/
+__pycache__/
+*.py[cod]
+*.log
