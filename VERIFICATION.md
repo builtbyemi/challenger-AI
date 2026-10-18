@@ -15,7 +15,7 @@ Test results from this work:
 
 | Check | Result | Scope |
 |---|---|---|
-| Python unittest suite | 264 tests; 263 passed, 1 skipped | Rerun after the telemetry fix on 2026-10-18. Temporary SQLite and fake Telegram/Groq transports. The skip is POSIX permissions on Windows. |
+| Python unittest suite | 270 tests; 269 passed, 1 skipped | Rerun after the preview startup repair on 2026-10-19. Temporary SQLite and fake Telegram/Groq transports. The skip is POSIX permissions on Windows. |
 | Authentication CLI | Passed with fake Telegram transport | Actual CLI subprocess and console input for Accounts 2–5 in sequence, session/history preservation, disabled-slot loading, forced AUTO_SEND=false, 2FA, invalid/expired codes, timeouts, cancellation and FloodWait. Real phone authorization still requires the account owner. |
 | Frontend + database tests | 15 passed | UI/data loading, both SQL migrations, publisher binding repair/idempotency and RLS in embedded PostgreSQL. |
 | Browser integration | 1 passed | Synthetic five-account workers → SQLite → telemetry publisher → PostgreSQL RPC/RLS → authenticated dashboard. All pages, polling, offline state and 390px mobile layout checked. External HTTP/Auth are mocked. |
@@ -35,4 +35,4 @@ Remaining external setup:
 4. Contest window rules and a scoring source were not supplied. Rolling limits remain the default; verified points stay unknown without an explicit organizer award import.
 5. Optional discussion starters need suitable `DISCUSSION_TOPICS`. They are disabled when the list is empty; unused allowance never forces activity.
 
-Current `.env` has `AUTO_SEND=false`. Existing credentials, sessions and database history were retained. Setup/start/login/deploy commands are in `README.md` and `DEPLOYMENT.md`. A hosted end-to-end smoke test remains necessary after external setup, using preview mode without live Telegram sends.
+Normal configuration may use `AUTO_SEND=true`; explicit `--preview` forces all five accounts to `auto_send=False` before validation or initialization. Existing credentials, sessions and database history were retained. See `STARTUP_FIX.md` for the confirmed running-instance lock conflict and safe restart instructions. Setup/start/login/deploy commands are in `README.md` and `DEPLOYMENT.md`. A hosted end-to-end smoke test remains necessary after external setup, using preview mode without live Telegram sends.

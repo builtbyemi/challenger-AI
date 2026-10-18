@@ -8,6 +8,8 @@ Supabase uploads failing with `Telemetry upload deferred`: see [the telemetry re
 
 ## Windows setup
 
+Startup reporting `Stopped (RuntimeError)`, or a second worker refusing to start: see [STARTUP_FIX.md](STARTUP_FIX.md). Preview is an explicit runtime override; `--check-config --preview` displays its effective settings. Stop the existing worker with Ctrl+C before launching another instance.
+
 Use Python 3.11+ and Node.js 24 LTS. Run these commands in PowerShell; activation is unnecessary, including after the folder rename:
 
 ```powershell

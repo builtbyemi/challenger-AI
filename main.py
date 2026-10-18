@@ -53,6 +53,10 @@ def main() -> int:
     except ValueError as exc:
         print(f"Configuration error: {exc}")
         return 2
+    # Apply before every command, validation and worker initialization. In
+    # particular --check-config --preview must display the effective mode.
+    if args.preview or args.telemetry_check:
+        app = replace(app, accounts=tuple(replace(a, auto_send=False) for a in app.accounts))
     if args.check_config:
         print(f"Configuration OK | enabled={len(app.accounts)}/5 | model={app.accounts[0].groq_model} "
               f"| group cap={app.group_max_actions}/{app.accounts[0].window_mode}-hour | no fixed gap")
@@ -60,8 +64,6 @@ def main() -> int:
             print(f"  {account.account_id}: AUTO_SEND={account.auto_send} "
                   f"| cap={account.max_actions}/{account.window_mode}-hour")
         return 0
-    if args.preview or args.telemetry_check:
-        app = replace(app, accounts=tuple(replace(a, auto_send=False) for a in app.accounts))
     if args.telemetry_check:
         from challenger.telemetry import check_telemetry
         try:
@@ -94,6 +96,7 @@ def main() -> int:
     logging.getLogger("telethon").setLevel(logging.WARNING)
     from challenger.application import login_accounts, run_application
     from challenger.auth import LoginError
+    from challenger.startup import failure_summary
     try:
         operation = login_accounts(app, login_ids) if login_ids else run_application(app)
         asyncio.run(run_with_shutdown(operation, propagate_cancel=bool(login_ids)))
@@ -104,11 +107,10 @@ def main() -> int:
         print(f"Authentication failed: {exc}", flush=True)
         return 1
     except ValueError as exc:
-        logging.error("Configuration rejected: %s", exc)
+        logging.error("Startup rejected: %s", failure_summary(exc))
         return 2
     except Exception as exc:
-        # Provider exceptions can contain request details; expose only the type.
-        logging.error("Stopped (%s); inspect configuration and connection status", type(exc).__name__)
+        logging.error("Startup stopped: %s", failure_summary(exc))
         return 1
     return 0
 

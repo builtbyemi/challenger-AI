@@ -4,6 +4,7 @@ import logging
 import time
 import os
 from dataclasses import replace
+from contextlib import ExitStack
 
 from .auth import AuthenticationRequired, LoginError, authenticate, prepare_account
 from .config import ApplicationSettings, Settings
@@ -14,6 +15,7 @@ from .storage import Store
 from .telegram_app import instance_lock, run as run_account
 from .usage import UsageLedger
 from .diagnostics import DiagnosticHandler
+from .startup import startup_stage, failure_summary
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +81,8 @@ async def supervise(account: Settings, app: ApplicationSettings, coordinator: Co
             delay = max(delay, exc.seconds)
             log.warning("Account %s deferred by Telegram for %.0fs", account.account_id, exc.seconds)
         except Exception as exc:
-            log.warning("Account %s failed (%s); reconnect deferred", account.account_id, type(exc).__name__)
+            log.warning("Account %s failed; %s; reconnect deferred", account.account_id,
+                        failure_summary(exc, "account_worker"))
         if time.monotonic() - started >= 300:
             delay = app.restart_delay
         await asyncio.sleep(delay)
@@ -87,16 +90,30 @@ async def supervise(account: Settings, app: ApplicationSettings, coordinator: Co
 
 
 async def run_application(app: ApplicationSettings) -> None:
-    validate_live_readiness(app)
-    app.coordinator_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for account in app.accounts:
+        log.info("STARTUP account=%s mode=%s cap=%s/%s-hour", account.account_id,
+                 "LIVE" if account.auto_send else "PREVIEW", account.max_actions, account.window_mode)
+    with startup_stage("live_validation"):
+        validate_live_readiness(app)
+    with startup_stage("runtime_directory"):
+        app.coordinator_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # All launch commands sharing this state must use one coordinator process.
     # Account locks additionally protect individual Telegram session files.
-    with instance_lock(app.coordinator_path.with_suffix(".coordinator.lock")):
-        coordinator = Coordinator(app.coordinator_path, app.group_max_actions,
-                                  app.accounts[0].window_mode, app.accounts[0].timezone)
-        ledger = UsageLedger(app.coordinator_path, app.groq_rpm, app.groq_rpd, app.groq_tpm, app.groq_tpd)
-        diagnostics = DiagnosticHandler(app.coordinator_path)
-        logging.getLogger().addHandler(diagnostics)
+    with ExitStack() as resources:
+        with startup_stage("coordinator_lock"):
+            resources.enter_context(instance_lock(app.coordinator_path.with_suffix(".coordinator.lock")))
+        with startup_stage("coordinator_database"):
+            coordinator = Coordinator(app.coordinator_path, app.group_max_actions,
+                                      app.accounts[0].window_mode, app.accounts[0].timezone)
+            resources.callback(coordinator.close)
+        with startup_stage("usage_ledger"):
+            ledger = UsageLedger(app.coordinator_path, app.groq_rpm, app.groq_rpd, app.groq_tpm, app.groq_tpd)
+            resources.callback(ledger.close)
+        with startup_stage("diagnostics_database"):
+            diagnostics = DiagnosticHandler(app.coordinator_path)
+            resources.callback(diagnostics.close)
+            logging.getLogger().addHandler(diagnostics)
+            resources.callback(logging.getLogger().removeHandler, diagnostics)
         telemetry_task = None
         decider = None
         tasks = []
@@ -131,19 +148,21 @@ async def run_application(app: ApplicationSettings) -> None:
                     save_telegram_wait(account, exc.seconds)
                     log.warning("Account %s has a persistent Telegram wait", account.account_id)
                 except Exception as exc:
-                    log.warning("Account %s unavailable during discovery (%s); independent retry scheduled",
-                                account.account_id, type(exc).__name__)
+                    log.warning("Account %s unavailable during discovery; %s; independent retry scheduled",
+                                account.account_id, failure_summary(exc, "identity_discovery"))
                 eligible.append(account)
             if not eligible:
                 log.warning("No authenticated accounts available; no workers started")
                 return
             first = app.accounts[0]
-            decider = SharedGroqDecider(first.groq_api_key, first.groq_model, coordinator,
-                                       concurrency=app.groq_concurrency, ledger=ledger)
-            tasks = [asyncio.create_task(supervise(account, app, coordinator, decider,
-                                                  identity_known=account.account_id in known),
-                                         name=f"challenger-{account.account_id}") for account in eligible]
-            await asyncio.gather(*tasks)
+            with startup_stage("groq_initialization"):
+                decider = SharedGroqDecider(first.groq_api_key, first.groq_model, coordinator,
+                                           concurrency=app.groq_concurrency, ledger=ledger)
+            with startup_stage("account_supervision"):
+                tasks = [asyncio.create_task(supervise(account, app, coordinator, decider,
+                                                      identity_known=account.account_id in known),
+                                             name=f"challenger-{account.account_id}") for account in eligible]
+                await asyncio.gather(*tasks)
         finally:
             if telemetry_task is not None:
                 telemetry_task.cancel()
@@ -151,14 +170,8 @@ async def run_application(app: ApplicationSettings) -> None:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            try:
-                if decider is not None:
-                    await decider.aclose()
-            finally:
-                coordinator.close()
-                ledger.close()
-                logging.getLogger().removeHandler(diagnostics)
-                diagnostics.close()
+            if decider is not None:
+                await decider.aclose()
 
 
 async def login_account(app: ApplicationSettings, account_id: str) -> None:

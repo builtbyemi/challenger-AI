@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -61,7 +62,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_targets_exact_message_without_formatting(self):
         client = SimpleNamespace(send_message=AsyncMock(return_value=message(
             90, "It's listed there, check again", outgoing=True, reply_to_id=42)))
-        gateway = TelethonGateway(client, settings(), Identity(99))
+        gateway = TelethonGateway(client, replace(settings(), auto_send=True), Identity(99))
         sent = await gateway.send("It's listed there, check again", 42)
         client.send_message.assert_awaited_once_with(
             -123, "It's listed there, check again", reply_to=42,
@@ -74,7 +75,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             get_messages=AsyncMock(side_effect=FloodWaitError(None, capture=900)),
             send_message=AsyncMock(side_effect=FloodWaitError(None, capture=900)),
         )
-        gateway = TelethonGateway(client, settings(), Identity(99))
+        gateway = TelethonGateway(client, replace(settings(), auto_send=True), Identity(99))
         for operation in (gateway.sync, lambda: gateway.refresh(42),
                           lambda: gateway.send("A short useful reply", 42)):
             with self.assertRaises(TelegramBackoff) as caught:

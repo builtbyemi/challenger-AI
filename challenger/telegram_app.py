@@ -17,6 +17,7 @@ from .groq_client import GroqDecider, PersonaDecider
 from .models import Identity, Message
 from .storage import Store
 from .windows import day_start
+from .startup import InstanceAlreadyRunning
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,10 @@ class TelethonGateway:
             raise TelegramBackoff(exc.seconds) from None
 
     async def send(self, text: str, target_id: int | None) -> Message:
+        # Independent last-line guard for all replies/starters/retries. The
+        # engine normally simulates delivery without calling this adapter.
+        if not self.settings.auto_send:
+            raise RuntimeError("Telegram sending is disabled in PREVIEW mode")
         try:
             sent = await asyncio.wait_for(self.client.send_message(
                 self.settings.chat_id, text, reply_to=target_id,
@@ -135,7 +140,8 @@ def instance_lock(path: Path):
                 import fcntl
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            raise RuntimeError("This Telegram session is already running") from None
+            scope = "coordinator" if path.name.endswith(".coordinator.lock") else "session"
+            raise InstanceAlreadyRunning(scope) from None
         try:
             yield
         finally:
