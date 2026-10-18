@@ -1,18 +1,21 @@
 from contextlib import closing, redirect_stderr, redirect_stdout
+import asyncio
 from dataclasses import replace
 import io
 import os
 from pathlib import Path
 import sqlite3
 import stat
+import threading
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from telethon.errors import FloodWaitError
+from telethon.errors import (FloodWaitError, SessionPasswordNeededError, PhoneCodeInvalidError,
+                             PhoneCodeExpiredError, PasswordHashInvalidError)
 
-from challenger.auth import AuthenticationRequired, authenticate, prepare_account, session_file
+from challenger.auth import AuthenticationRequired, LoginError, authenticate, prepare_account, session_file
 from challenger.config import Settings
 from challenger.engine import TelegramBackoff
 from challenger.telegram_app import instance_lock
@@ -29,6 +32,8 @@ def fake_client(user_id=99, username="testuser", authorized=True):
         connect=AsyncMock(), start=AsyncMock(), disconnect=AsyncMock(),
         is_user_authorized=AsyncMock(return_value=authorized),
         get_me=AsyncMock(return_value=SimpleNamespace(id=user_id, username=username)),
+        send_code_request=AsyncMock(return_value=SimpleNamespace(phone_code_hash="synthetic-hash")),
+        sign_in=AsyncMock(),
     )
 
 
@@ -132,7 +137,9 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         client.is_user_authorized.assert_awaited_once()
         client.start.assert_not_awaited()
         client.disconnect.assert_awaited_once()
-        self.assertEqual(factory.call_args.kwargs["request_retries"], 0)
+        # Keep the existing two-attempt transient retry configuration; it does
+        # not authorize prompts or automatic FloodWait sleeps in this probe.
+        self.assertEqual(factory.call_args.kwargs["request_retries"], 2)
         self.assertEqual(factory.call_args.kwargs["flood_sleep_threshold"], 0)
         self.assertFalse(factory.call_args.kwargs["catch_up"])
 
@@ -148,27 +155,129 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         client.get_me.assert_not_awaited()
         client.disconnect.assert_awaited_once()
 
-    async def test_explicit_login_uses_hidden_phone_code_and_2fa_callbacks(self):
-        client = fake_client()
-        received = []
-
-        async def start(**callbacks):
-            received.extend(callbacks[name]() for name in ("phone", "code_callback", "password"))
-
-        client.start.side_effect = start
+    async def test_explicit_login_prompts_phone_code_and_hidden_2fa(self):
+        client = fake_client(authorized=False)
+        client.sign_in.side_effect = [SessionPasswordNeededError(None), None]
         output = io.StringIO()
-        secrets = ["+234000000000", "12345", "synthetic-2fa-password"]
+        secrets = ["+234000000000", "12345", " synthetic-2fa-password "]
         with patch("challenger.auth.TelegramClient", return_value=client), \
-             patch("challenger.auth.getpass.getpass", side_effect=secrets) as hidden_input, \
+             patch("builtins.input", side_effect=secrets[:2]), \
+             patch("challenger.auth.getpass.getpass", return_value=secrets[2]) as hidden_input, \
              redirect_stdout(output), redirect_stderr(output):
             identity = await authenticate(self.settings, interactive=True)
         self.assertEqual(identity.user_id, 99)
-        self.assertEqual(received, secrets)
-        self.assertEqual(hidden_input.call_count, 3)
-        self.assertTrue(all("account_1" in call.args[0] for call in hidden_input.call_args_list))
+        client.send_code_request.assert_awaited_once_with(secrets[0])
+        self.assertEqual(client.sign_in.await_args_list[0].kwargs,
+                         dict(phone=secrets[0], code=secrets[1], phone_code_hash="synthetic-hash"))
+        self.assertEqual(client.sign_in.await_args_list[1].kwargs, dict(password=secrets[2]))
+        hidden_input.assert_called_once()
+        for label in ("Connecting", "Phone number", "verification code", "2FA password (input hidden)"):
+            self.assertIn(label, output.getvalue())
         self.assertTrue(all(secret not in output.getvalue() for secret in secrets))
-        client.connect.assert_not_awaited()
+        client.connect.assert_awaited_once()
         client.disconnect.assert_awaited_once()
+
+    async def test_authorized_interactive_session_skips_all_prompts(self):
+        client = fake_client()
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("builtins.input", side_effect=AssertionError("Unexpected prompt")):
+            await authenticate(self.settings, interactive=True)
+        client.send_code_request.assert_not_awaited()
+        client.sign_in.assert_not_awaited()
+
+    async def test_invalid_codes_and_passwords_retry_without_resending_code(self):
+        client = fake_client(authorized=False)
+        client.sign_in.side_effect = [PhoneCodeInvalidError(None), SessionPasswordNeededError(None),
+                                      PasswordHashInvalidError(None), None]
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("builtins.input", side_effect=["+234000000000", "bad-code", "12345"]), \
+             patch("challenger.auth.getpass.getpass", side_effect=["bad-password", "good-password"]):
+            await authenticate(self.settings, interactive=True)
+        self.assertEqual(client.sign_in.await_count, 4)
+        client.send_code_request.assert_awaited_once()
+
+    async def test_code_attempts_are_bounded_and_expired_code_stops(self):
+        for error, attempts in [(PhoneCodeInvalidError(None), 3), (PhoneCodeExpiredError(None), 1)]:
+            client = fake_client(authorized=False)
+            client.sign_in.side_effect = error
+            with patch("challenger.auth.TelegramClient", return_value=client), \
+                 patch("builtins.input", side_effect=["+234000000000", "1", "2", "3"]):
+                with self.assertRaises(LoginError):
+                    await authenticate(self.settings, interactive=True)
+            self.assertEqual(client.sign_in.await_count, attempts)
+            client.send_code_request.assert_awaited_once()
+            client.disconnect.assert_awaited_once()
+
+    async def test_connection_timeout_releases_session_lock(self):
+        client = fake_client()
+        async def stalled():
+            await asyncio.Event().wait()
+        client.connect.side_effect = stalled
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("challenger.auth.LOGIN_TIMEOUT", 0.01):
+            with self.assertRaisesRegex(LoginError, "Timed out while connecting"):
+                await authenticate(self.settings, interactive=True)
+        client.disconnect.assert_awaited_once()
+        with instance_lock(session_file(self.settings.session_path).with_suffix(".challenger.lock")):
+            pass
+
+    async def test_disconnect_timeout_does_not_mask_success(self):
+        client = fake_client()
+        async def stalled():
+            await asyncio.Event().wait()
+        client.disconnect.side_effect = stalled
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("challenger.auth.DISCONNECT_TIMEOUT", 0.01):
+            self.assertEqual((await authenticate(self.settings, interactive=True)).user_id, 99)
+
+    async def test_eof_or_invalid_phone_never_requests_code(self):
+        for supplied in [EOFError(), "not a phone"]:
+            client = fake_client(authorized=False)
+            with patch("challenger.auth.TelegramClient", return_value=client), \
+                 patch("builtins.input", side_effect=[supplied]):
+                with self.assertRaises(LoginError):
+                    await authenticate(self.settings, interactive=True)
+            client.send_code_request.assert_not_awaited()
+            client.disconnect.assert_awaited_once()
+
+    async def test_interactive_floodwait_is_actionable_without_retry(self):
+        client = fake_client(authorized=False)
+        client.send_code_request.side_effect = FloodWaitError(None, capture=900)
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("builtins.input", return_value="+234000000000"):
+            with self.assertRaisesRegex(LoginError, "wait of 900s"):
+                await authenticate(self.settings, interactive=True)
+        client.send_code_request.assert_awaited_once()
+
+    async def test_cancel_during_network_call_disconnects(self):
+        client = fake_client()
+        client.connect.side_effect = asyncio.CancelledError
+        with patch("challenger.auth.TelegramClient", return_value=client):
+            with self.assertRaises(asyncio.CancelledError):
+                await authenticate(self.settings, interactive=True)
+        client.disconnect.assert_awaited_once()
+
+    async def test_cancel_while_typing_does_not_block_event_loop_or_cleanup(self):
+        client = fake_client(authorized=False)
+        started, release = threading.Event(), threading.Event()
+        def waiting_input():
+            started.set()
+            release.wait(3)
+            return "+234000000000"
+        with patch("challenger.auth.TelegramClient", return_value=client), \
+             patch("builtins.input", side_effect=waiting_input):
+            task = asyncio.create_task(authenticate(self.settings, interactive=True))
+            try:
+                async with asyncio.timeout(2):
+                    while not started.is_set():
+                        await asyncio.sleep(0.01)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+            finally:
+                release.set()
+        client.disconnect.assert_awaited_once()
+        client.send_code_request.assert_not_awaited()
 
     async def test_multiple_accounts_use_independent_session_paths(self):
         first, second = fake_client(99), fake_client(100)

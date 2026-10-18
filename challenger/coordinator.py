@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import AsyncIterator, Iterator
 
 from .models import Message
+from .windows import window_start
 
 
 def _normalized(text: str) -> str:
@@ -41,9 +42,11 @@ class Coordinator:
 
     _locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
-    def __init__(self, path: Path | str, max_actions: int = 5) -> None:
+    def __init__(self, path: Path | str, max_actions: int = 5,
+                 window_mode: str = "rolling", timezone: str = "Africa/Lagos") -> None:
         self.path = str(path)
-        self.max_actions = max(1, min(5, int(max_actions)))
+        self.max_actions = max(1, min(25, int(max_actions)))
+        self.window_mode, self.timezone = window_mode, timezone
         self._lock_path = str(Path(self.path).resolve()).casefold() if self.path != ":memory:" else f"memory:{id(self)}"
         self._con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         self._con.row_factory = sqlite3.Row
@@ -151,7 +154,7 @@ class Coordinator:
 
     def recent_replies(self, chat_id: int, now: float, limit: int = 50) -> list[str]:
         rows = self._con.execute(
-            """SELECT text FROM gc_actions WHERE chat_id=? AND kind='REPLY' AND activity_at>=?
+            """SELECT text FROM gc_actions WHERE chat_id=? AND kind IN ('REPLY','START_DISCUSSION') AND activity_at>=?
                ORDER BY activity_at DESC,id DESC LIMIT ?""",
             (chat_id, now - 7 * 86400, max(0, limit)),
         ).fetchall()
@@ -160,20 +163,27 @@ class Coordinator:
     def quota_remaining(self, chat_id: int, now: float) -> int:
         used = self._con.execute(
             """SELECT COUNT(*) FROM gc_actions WHERE chat_id=?
-               AND kind='REPLY' AND status!='rejected' AND activity_at>?""",
-            (chat_id, now - 3600),
+               AND kind IN ('REPLY','START_DISCUSSION') AND status!='rejected' AND activity_at>=?""",
+            (chat_id, self._window_boundary(now)),
         ).fetchone()[0]
         return max(0, self.max_actions - used)
 
     def quota_wait(self, chat_id: int, now: float) -> float:
+        if self.window_mode == "fixed":
+            return max(0, window_start(now, "fixed", self.timezone) + 3600 - now) if self.quota_remaining(chat_id, now) == 0 else 0
         rows = self._con.execute(
-            "SELECT activity_at FROM gc_actions WHERE chat_id=? AND kind='REPLY' AND status!='rejected' ORDER BY activity_at DESC LIMIT ?",
+            "SELECT activity_at FROM gc_actions WHERE chat_id=? AND kind IN ('REPLY','START_DISCUSSION') AND status!='rejected' ORDER BY activity_at DESC LIMIT ?",
             (chat_id, self.max_actions),
         ).fetchall()
         if not rows:
             return 0.0
         hourly = rows[-1][0] + 3600 - now if len(rows) == self.max_actions else 0.0
         return max(0.0, hourly)
+
+    def _window_boundary(self, now: float) -> float:
+        import math
+        boundary = window_start(now, self.window_mode, self.timezone)
+        return math.nextafter(boundary, math.inf) if self.window_mode == "rolling" else boundary
 
     def is_claimed(self, chat_id: int, message_id: int) -> bool:
         return self._con.execute(
@@ -182,7 +192,7 @@ class Coordinator:
 
     def reserve(
         self, account_id: str, chat_id: int, message_id: int,
-        text: str, mode: str, now: float,
+        text: str, mode: str, now: float, kind: str = "REPLY",
     ) -> int | None:
         if mode not in ("live", "preview"):
             raise ValueError("mode must be live or preview")
@@ -198,16 +208,16 @@ class Coordinator:
             if self._con.execute("SELECT 1 FROM gc_blocks WHERE until>? LIMIT 1", (now,)).fetchone():
                 return None
             history = self._con.execute(
-                "SELECT text FROM gc_actions WHERE chat_id=? AND kind='REPLY' AND activity_at>=?",
+                "SELECT text FROM gc_actions WHERE chat_id=? AND kind IN ('REPLY','START_DISCUSSION') AND activity_at>=?",
                 (chat_id, now - 7 * 86400),
             )
             if any(_similar(text, row[0]) for row in history):
                 return None
             cursor = self._con.execute(
                 """INSERT INTO gc_actions
-                   (account_id,chat_id,source_id,text,mode,reserved_at,activity_at,status)
-                   VALUES (?,?,?,?,?,?,?,'reserved')""",
-                (account_id, chat_id, message_id, text, mode, now, now),
+                   (account_id,chat_id,source_id,text,mode,reserved_at,activity_at,status,kind)
+                   VALUES (?,?,?,?,?,?,?,'reserved',?)""",
+                (account_id, chat_id, message_id, text, mode, now, now, kind),
             )
             action_id = int(cursor.lastrowid)
             self._claim_target(chat_id, message_id, action_id)
@@ -235,6 +245,13 @@ class Coordinator:
             row = self._con.execute("SELECT * FROM gc_actions WHERE id=?", (claim_id,)).fetchone()
             if row is None:
                 raise ValueError("Unknown group reservation")
+            if telegram_id is not None and row["telegram_id"] is not None and telegram_id != row["telegram_id"]:
+                self._con.execute("UPDATE gc_actions SET telegram_id=NULL WHERE id=?", (claim_id,))
+                self._con.execute(
+                    """INSERT INTO gc_actions(account_id,chat_id,source_id,text,kind,mode,reserved_at,activity_at,status,telegram_id)
+                       VALUES (?,?,?,?,'REPLY','observed',?,?,'sent',?)""",
+                    (row["account_id"], row["chat_id"], row["source_id"] if row["kind"] == "REPLY" else None,
+                     row["text"], row["activity_at"], row["activity_at"], row["telegram_id"]))
             if telegram_id is not None:
                 observed = self._con.execute(
                     "SELECT * FROM gc_actions WHERE chat_id=? AND telegram_id=? AND id!=?",
@@ -278,8 +295,10 @@ class Coordinator:
                     """SELECT id FROM gc_actions WHERE account_id=? AND chat_id=?
                        AND source_id=? AND text=? AND telegram_id IS NULL AND mode!='preview'
                        AND kind='REPLY' AND status IN ('reserved','sent','uncertain')
+                       AND reserved_at BETWEEN ? AND ?
                        ORDER BY reserved_at DESC LIMIT 1""",
-                    (sender_account, message.chat_id, message.reply_to_id, message.text),
+                    (sender_account, message.chat_id, message.reply_to_id, message.text,
+                     message.sent_at - 120, message.sent_at + 30),
                 ).fetchone()
             if reservation:
                 action_id = reservation[0]
@@ -328,6 +347,12 @@ class Coordinator:
                         "SELECT * FROM gc_actions WHERE chat_id=? AND telegram_id=?",
                         (chat_id, telegram_id),
                     ).fetchone()
+                if existing is None and source_id is None and kind == "START_DISCUSSION":
+                    existing = self._con.execute(
+                        """SELECT * FROM gc_actions WHERE account_id=? AND chat_id=?
+                           AND kind='START_DISCUSSION' AND text=? AND mode=? AND reserved_at=?
+                           ORDER BY id DESC LIMIT 1""",
+                        (account_id, chat_id, text, mode, reserved_at)).fetchone()
                 if existing is None and source_id is not None:
                     existing = self._con.execute(
                         """SELECT a.* FROM gc_actions a WHERE account_id=? AND chat_id=?

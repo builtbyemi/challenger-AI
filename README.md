@@ -1,194 +1,151 @@
-# Telegram Challenger
+﻿# Challenger Ai — Telegram Challenger
 
-A conservative Telethon participant using Groq and persistent SQLite state, with support for up to five independently authenticated Telegram accounts. Python 3.11 or later is required. Only the existing account is enabled by default. `AUTO_SEND=false` remains the default; adding credentials does not itself log in another account or send messages.
+This is the existing project, upgraded in place. `telegram_challenger_v07.py` remains a compatible entry point. Account 1's session and SQLite history are retained. The folder is now `C:\Users\EMMANUEL\Desktop\Challenger Ai`.
 
-Your existing `.env`, credentials, target group and database history are preserved. **Do not copy `.env.example` over an existing `.env`.** The example documents settings to add selectively. No additional accounts were authenticated and no Telegram messages were sent as part of this refactor.
+The worker supports five separately authenticated accounts, optional relevant discussion starters, persistent manual/automated message budgets, and a private React dashboard. Five messages per account is a ceiling, never a posting target. No generated filler is used to reach a quota.
 
-## Install, validate and preview in Windows PowerShell
+Supabase uploads failing with `Telemetry upload deferred`: see [the telemetry repair guide](TELEMETRY_FIX.md) for the verified causes, administrator SQL repair and `python main.py --telemetry-check`.
 
-Stop the old script before starting this version. Run:
+## Windows setup
+
+Use Python 3.11+ and Node.js 24 LTS. Run these commands in PowerShell; activation is unnecessary, including after the folder rename:
 
 ```powershell
-Set-Location 'C:\Users\EMMANUEL\Desktop\telegram-challenger'
-if (-not (Test-Path -LiteralPath '.\.venv\Scripts\python.exe')) {
-    py -3 -m venv .venv
-}
+Set-Location 'C:\Users\EMMANUEL\Desktop\Challenger Ai'
+# Only if the virtual environment is absent:
+if (-not (Test-Path '.\.venv\Scripts\python.exe')) { py -m venv .venv }
 & .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:AUTO_SEND = 'false'
 & .\.venv\Scripts\python.exe -X utf8 main.py --check-config
-& .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-& .\.venv\Scripts\python.exe -X utf8 main.py
 ```
 
-No environment activation or PowerShell execution-policy change is necessary. `--check-config` reads configuration without connecting to Telegram/Groq, creating a database or copying a session. Tests use temporary storage and mocked Telegram/Groq services. Press Ctrl+C to stop a foreground run.
+Keep the existing `.env`. Do not copy `.env.example` over it. The example is a reference for additional settings. The eight `ACCOUNT_2_API_ID` / `ACCOUNT_2_API_HASH` through Account 5 placeholders have been added without clearing existing credentials. Blank optional API credentials inherit shared `API_ID` / `API_HASH`; each Telegram user still requires its own phone login. Never paste login codes or passwords into source files.
 
-The original entry point remains supported and starts the same application:
+Authenticate Accounts 2–5 sequentially with this single PowerShell command from the project folder. Login forces `AUTO_SEND=false`, works with disabled account slots, and never starts group workers or Groq:
 
 ```powershell
-& .\.venv\Scripts\python.exe -X utf8 telegram_challenger_v07.py --check-config
-& .\.venv\Scripts\python.exe -X utf8 telegram_challenger_v07.py
+& .\.venv\Scripts\python.exe -X utf8 -u main.py --login-all
 ```
 
-Preview connects already authenticated accounts to Telegram and can send conversation context to Groq, but sends no group replies. A successful preview reserves the same persistent rolling-hour quota as a live send. There is no fixed inter-message cooldown. Restarting, switching modes or selecting another account cannot reset shared group limits. Silence is expected when no worthwhile messages are available.
+Each account shows connection progress, then asks for its phone number (including country code), Telegram verification code, and 2FA password if required. Phone and code input are visible; the password is hidden and its prompt says so. Existing authorized sessions are reused without prompting. Account 1 is not included in `--login-all`. To authenticate one account, use `python main.py --login account_2` (likewise Accounts 3–5).
 
-## Authenticate an additional account
+Network steps time out after 30 seconds; disconnect cleanup is limited to 5 seconds. Typing has no deadline; Ctrl+C cancels safely. Invalid codes/passwords allow at most three attempts. Expired codes and Telegram flood limits stop login with an explanation instead of retrying aggressively. The sequence stops on failure; retry the individual account, or rerun `--login-all` to reuse successful sessions and continue. Use an interactive PowerShell terminal, not an IDE Output pane or a background task.
 
-Each slot uses a different Telegram user session and activity database. API credentials identify a Telegram application; each interactive phone/code login determines the Telegram user. The application rejects duplicate connected Telegram identities and conflicting session/database paths.
+Login does not edit `.env`, credentials, account enable flags, or Account 1's session/history. Keep `AUTO_SEND=false` in `.env`. After authentication, set `ACCOUNT_2_ENABLED=true` through `ACCOUNT_5_ENABLED=true` only when ready to run those accounts. The normal worker reports missing logins and skips those accounts while others continue.
 
-1. Stop the running application. Keep `AUTO_SEND=false`.
-2. Edit the existing `.env` locally. Preserve existing lines and secrets. Add `ACCOUNT_2_ENABLED=true`. If account 2 needs different API credentials or a different group, set `ACCOUNT_2_API_ID`, `ACCOUNT_2_API_HASH` and `ACCOUNT_2_TARGET_CHAT_ID` to its actual values. Otherwise omit those overrides to inherit `API_ID`, `API_HASH` and `TARGET_CHAT_ID`. An explicitly empty override is invalid.
-3. Validate configuration, then explicitly authenticate that slot:
+```powershell
+# Preview connects to Telegram and Groq, but never sends group messages.
+& .\.venv\Scripts\python.exe -X utf8 main.py --preview
+# Stop with Ctrl+C before changing mode or starting another instance.
 
-   ```powershell
-   Set-Location 'C:\Users\EMMANUEL\Desktop\telegram-challenger'
-   $env:AUTO_SEND = 'false'
-   & .\.venv\Scripts\python.exe -X utf8 main.py --check-config
-   & .\.venv\Scripts\python.exe -X utf8 main.py --login account_2
-   ```
+# Read-only local diagnostics, usable in another terminal:
+& .\.venv\Scripts\python.exe -X utf8 main.py --status
+& .\.venv\Scripts\python.exe -X utf8 main.py --health
+```
 
-4. Enter that account's phone number, Telegram verification code and two-step verification password when requested. Code and password entry are hidden; they are not written to application logs. This command authenticates the account and exits without starting reply workers.
-5. Start preview with `& .\.venv\Scripts\python.exe -X utf8 main.py`. Inspect selected target IDs and preview text. Other authorized accounts continue independently if one account disconnects or encounters a recoverable error.
-
-Repeat with slots 3 through 5 only when you explicitly want to add those accounts. They remain disabled otherwise. For a new installation with no existing first-account session, use `main.py --login account_1`. Normal startup never opens an interactive login or silently creates an authenticated account. If a session expires, stop and explicitly log in again.
-
-New sessions default to `sessions/account_N.session`; new histories default to `data/activity_account_N.sqlite3`. Optional `ACCOUNT_N_SESSION_PATH` and `ACCOUNT_N_DATABASE_PATH` override them. Avoid setting these unnecessarily: changing a database path loses access to that account's existing queue and activity ledger.
-
-## Enable live operation deliberately
-
-Live operation requires `AUTO_SEND=true`, `GROUP_AUTOMATION_ALLOWED=true`, and `ACCOUNT_N_AUTOMATION_DISCLOSED=true` for each enabled account. The permission flag attests that automation is allowed in the configured groups. The disclosure flag attests that you have identified each account as automated through its profile or the group's agreed disclosure method. These settings do not edit profiles or post notices automatically.
-
-After arranging permission and disclosure, stop preview and explicitly opt in. For just the existing account:
+For an explicitly authorized live run, after checking group permission and disclosing each account's automation:
 
 ```powershell
 $env:GROUP_AUTOMATION_ALLOWED = 'true'
-$env:ACCOUNT_1_AUTOMATION_DISCLOSED = 'true'
+1..5 | ForEach-Object { Set-Item -Path "Env:ACCOUNT_$($_)_AUTOMATION_DISCLOSED" -Value 'true' }
 $env:AUTO_SEND = 'true'
-& .\.venv\Scripts\python.exe -X utf8 main.py
+New-Item -ItemType Directory -Force .\logs | Out-Null
+& .\.venv\Scripts\python.exe -X utf8 -u main.py 2>&1 | Tee-Object -FilePath .\logs\worker.log -Append
+# Separate terminal:
+Get-Content .\logs\worker.log -Tail 50 -Wait
 ```
 
-If other slots are enabled, set their corresponding disclosure flags too. Stop the application and restore `$env:AUTO_SEND = 'false'` for preview. PowerShell environment changes apply only to that shell and its child processes; service and Task Scheduler runs read their own environment and the local `.env`. Keep `.env` in preview mode until you deliberately change the scheduled application's configuration.
+`--preview` always overrides live configuration. Templates default to `AUTO_SEND=false`. Tests use fake Telegram transports, never a live send. PowerShell environment values override `.env` and affect only that shell. Stop old workers before relaunching.
 
-## Configuration and architecture
+## Scheduling, manual messages and persistence
 
-| Setting | Behavior |
-| --- | --- |
-| `ACCOUNT_1_ENABLED` | Defaults to `true`; slots 2–5 default to `false` |
-| `ACCOUNT_N_API_ID`, `ACCOUNT_N_API_HASH`, `ACCOUNT_N_TARGET_CHAT_ID` | Per-slot overrides; absent values inherit shared Telegram settings |
-| `GROQ_API_KEY`, `GROQ_MODEL` | One shared Groq integration using the existing key/model |
-| `GROQ_CONCURRENCY` | Defaults to 1; bounded to 1–3 simultaneous requests |
-| `MAX_ACTIONS_PER_HOUR` | Per-account ceiling; at most 5 messages per rolling hour |
-| `GROUP_MAX_ACTIONS_PER_HOUR` | Aggregate ceiling across accounts; at most 5 messages per rolling hour |
-| `COORDINATOR_DATABASE_PATH` | Shared ledger, default `data/coordinator.sqlite3`; preserve across restarts and deployments |
-| `ACCOUNT_RESTART_DELAY_SECONDS` | Supervisor retry baseline; at least 30 seconds, subject to longer backoff |
-| `BATCH_DELAY_SECONDS`, `BATCH_SIZE` | Defaults to 5 seconds and 20 incoming candidates |
-| `MAX_PENDING_AGE_SECONDS` | Defaults to 720 seconds; stale messages are discarded from pending work |
-| `GROUP_AUTOMATION_ALLOWED`, `ACCOUNT_N_AUTOMATION_DISCLOSED` | Explicit operator attestations required for live mode; default `false` |
+- Each account has its own session, SQLite history and strict cap of five counted messages. The combined group ceiling defaults to 25 and can be made stricter with `GROUP_MAX_ACTIONS_PER_HOUR`. There is no ten-minute minimum gap.
+- `HOURLY_WINDOW_MODE=rolling` uses the conservative previous 3,600 seconds. Once the cap is reached, the oldest relevant timestamp must expire before another send. Mentions never bypass the limit. `fixed` resets at the local hour boundary in `REPORT_TIMEZONE` (default `Africa/Lagos`); use it only after the contest window is confirmed.
+- Outgoing updates from phones, Desktop and other sessions count as manual activity. Recent outgoing history is reconciled at startup, after reconnects, during periodic history syncs and before sends. Today's history and the preceding rolling-hour tail are included. History scanning is bounded at 300 messages and fails closed on overflow.
+- `remaining = max(0, 5 - manual - bot)` for confirmed sends. Preview and pending/uncertain reservations also consume allowance conservatively. The dashboard displays those separately; previews never appear as actual messages or points.
+- Returned Telegram IDs merge echoed outgoing updates without double-counting. Exact text/target matches help reconcile an echo arriving before the send returns. Ambiguous timeouts retain a reservation; explicit Telegram rejections refund it and persist FloodWait. A simultaneous identical manual message can remain ambiguous until the send result is known.
+- SQLite transactions and OS session locks guard concurrent workers. Shared claims prevent several owned accounts answering the same target or responding recursively to one another. Manual activity in other groups is outside this configured competition group's accounting.
 
-The group cap is **five total messages, not five multiplied by the number of accounts**. Stricter hourly caps are allowed. No account is required to fill its available slots. The obsolete `MIN_GAP_SECONDS` and `GROUP_MIN_GAP_SECONDS` variables are ignored, even if inherited from an old environment. Group coordination suppresses replies to the other configured accounts, duplicate targets and repeated wording. Selection rejects leaderboard/score-farming requests; the system does not coordinate accounts to inflate activity scores.
+The application cannot stop a human sending a sixth message through another Telegram client, or atomically lock that client's send while making its own network request. It uses every observed update and final history check to prevent automated oversending; cross-device events arriving after the final check are a Telegram/network race, not an enforceable global lock. Keep the system clock synchronized.
 
-The project keeps its existing package structure:
+Account 1's legacy database stays in use. If its root session needs migration, the runtime copies it with SQLite backup into `sessions/account_1.session`, retaining the original. Existing dedicated sessions are never overwritten. Do not run original and copied sessions at the same time. Preserve `data/coordinator.sqlite3` and every account DB/session when moving the folder or hosting the worker elsewhere. Existing legacy tables remain intact.
 
-```text
-telegram-challenger/
-  main.py                         Application entry point and explicit login
-  telegram_challenger_v07.py       Compatible original command
-  challenger/
-    config.py                     Shared and independent account configuration
-    application.py                Independent account lifecycle and supervision
-    auth.py                       Explicit login and safe legacy-session copying
-    coordinator.py                Persistent group limits, claims and identities
-    telegram_app.py               Telethon adapter and session locks
-    engine.py                     Durable queue processing and final validation
-    groq_client.py                Shared asynchronous Groq HTTP integration
-    selection.py                  Eligibility, style and grounding checks
-    storage.py                    Account queues, activity and persistent waits
-    models.py                     Message, identity and decision records
-  tests/                          Mocked network and temporary-storage tests
-  sessions/                       Private Telegram sessions, created when needed
-  data/                           New account histories and shared coordinator
-  .env                            Existing private configuration
-  .env.example                    Reference configuration for five slots
-  requirements.txt
+## Participation and personalities
+
+The queue, deterministic relevance filters, Groq selection, output validation and final target refresh remain in place. The default decision is IGNORE. Open discussions and clearly shared reply threads can be considered without a mention. Private exchanges, generic filler, stale/already-answered questions, bot accusations not addressed to this account, promotions and repetitive wording are filtered.
+
+Accounts use distinct style preferences: relaxed Nigerian Pidgin; friendly English; playful wit; calm observation; energetic light slang. Replies must contain 3–5 words, preserve useful commas/apostrophes, and match the selected message's language. A style preference cannot justify invented facts, personal experiences or human identity claims. Direct automation questions receive a truthful short disclosure. Naturalness, dialect and relevance remain heuristic and cannot be guaranteed perfectly.
+
+Plain text welcome announcements may receive an occasional short welcome. They are skipped when another member already greeted the arrival or a welcome appears among the last five recorded replies. Native join service events without a text welcome are not supported.
+
+`START_DISCUSSION` is optional and uses curated, context-matched topics without extra Groq requests. Set semicolon-separated 3–5 word questions appropriate to the group, for example:
+
+```dotenv
+QUIET_PERIOD_SECONDS=900
+DISCUSSION_TOPICS=What makes transfers reliable?;Which fees affect transfers?
 ```
 
-Each account has its own client, worker, queue, identity and activity history. One failed/disconnected account does not stop healthy accounts. They share a bounded Groq client and central coordinator. Model-format errors trigger validated compatibility fallbacks; transient errors use bounded backoff, and provider rate-limit delays are honored. A provider-wide failure defers requests centrally instead of having each account retry aggressively. Telegram FloodWait is persisted for the affected account.
+A topic must overlap recent human conversation. The group must be quiet, allowance must remain, the topic must not repeat recent contributions, and an unanswered previous starter cannot trigger another. A shared quiet-episode claim prevents all accounts starting at once. Empty `DISCUSSION_TOPICS` disables starters. Silence or unused allowance alone never creates activity.
 
-## Selection and conversational style
+## Groq budgets
 
-IGNORE is the default. Deterministic filters reject generic observations, acknowledgments, fragments, reactions, conversations addressed to other members, stale questions and questions already answered. Bot/spam keywords alone never require a response. Clear questions and substantive statements in an active open discussion can become candidates; a question or mention is not required. Statements need recent topic-related participation from another member, and still pass grounding, repetition and private-exchange checks. Quotas are ceilings, never targets.
+One shared client uses the existing `GROQ_API_KEY` and `GROQ_MODEL` (example: `openai/gpt-oss-20b`). `GROQ_CONCURRENCY` is bounded to 1–3. Configure request/token limits from your Groq account's current limits:
 
-One selected message ID is validated against the eligible batch. The worker fetches that target and newer messages again before reserving a preview or sending with the exact `reply_to` ID. Incoming events continue being written to SQLite while Groq is processing. Excessively busy or ambiguous final history checks defer work.
-
-Replies usually contain 3–8 words, with a hard maximum of 10, use simple casual English or Nigerian Pidgin, and allow at most one supported emoji. Useful apostrophes and commas survive; exclamation marks and ending periods are removed. Generic filler, repetitive text, member impersonation, invented personal experiences and unsupported claims are rejected. Grounded clarification questions are occasional rather than habitual. Direct questions about automation receive a truthful, brief disclosure, subject to the same quotas and repetition checks.
-
-At `LOG_LEVEL=INFO`, `RECEIVED` confirms event reception, `QUEUED` confirms storage, `FILTERED` explains rejection, and `EVALUATING` identifies a Groq batch. `PROPOSED` means final checks are still pending; `SIMULATED REPLY` records a preview and consumes quota; `SENT REPLY` follows Telegram confirmation. A `WORKER` heartbeat reports queue size and remaining wait at least once per minute while processing normally. The resolved group ID is checked before workers start. If no messages are worthwhile, filters and heartbeat logs remain visible without forced inference or replies.
-
-Startup identity checks use a temporary session copy so they cannot advance the real session's saved update position and skip offline messages. Five messages per hour is a ceiling, not a guaranteed output target: meaningful participation and stale-message checks take precedence over filling slots.
-
-## Existing files and persistent scheduling
-
-The original `.env` is never rewritten. Existing legacy `ACCOUNT_ID`, `SESSION_PATH` and `DATABASE_PATH` still configure slot 1. Its legacy account ID remains the database namespace, and collisions with other enabled slot IDs are rejected.
-
-If paths are not explicitly overridden and the root `account_1.session` exists, the first normal run or explicit login makes a consistent SQLite backup copy into `sessions/account_1.session`. The original stays untouched. An existing dedicated session is never overwritten. `--check-config` does not copy anything. Stop older instances before migration; do not run the old root session and the copied session concurrently.
-
-An existing root `activity_account_1.sqlite3` remains in use. Existing custom database paths remain in use. The original single-account schema migration, when needed, creates a `.pre-challenger-v1.bak` backup, adds `tc_*` tables and retains original `actions`/`candidates` history. Legacy pending rows lacking thread information remain skipped history.
-
-Per-account and shared coordinator reservations are committed before sending or logging a successful preview. An uncertain send or crash retains its reservation; an interrupted cross-database reservation may conservatively consume a slot without a message. Target claims remain permanent so restart cannot resend to an old target. This deliberately favors missed replies over duplicate messages.
-
-The rolling window is `(now - 3600, now]`. With fewer than five counted messages, another relevant reply may be sent immediately after normal batch processing; no ten-minute check applies. At the cap, sending waits until a timestamp leaves the window. Confirmed sends, simulated sends and observed outgoing text share account quotas. In-flight and uncertain reservations temporarily count conservatively to prevent over-sending; an explicit Telegram rejection releases its reservation but still enforces the full FloodWait. Historical ambiguous failures remain conservatively counted, and reaction-only history does not consume text-message quota. Never delete/reset a database or change its path to reset the hourly quota. Keep the coordinator alongside every account history when moving the application. Stop the old instance before starting on another machine.
-
-`QUOTA` logs report remaining account and group slots, wait duration, and the reason for any block. `PROPOSED` reports the model's acceptance reason; `FILTERED` and `IGNORE` identify rejection reasons. A slot reservation is not proof of delivery: `SENT REPLY` means confirmed, `SIMULATED REPLY` means preview, and uncertain outcomes retain their reservation. Batch debouncing, duplicate prevention, shared inference limits and provider backoff remain active. The scheduler never creates activity to use spare slots.
-
-## Run continuously on Windows
-
-Authenticate all enabled accounts interactively first, finish preview testing, and configure the intended mode in `.env`. In Windows Task Scheduler, create one task under the same Windows user that owns the project:
-
-- Trigger: At startup, with a short delay for networking, or At log on.
-- Program/script: `C:\Users\EMMANUEL\Desktop\telegram-challenger\.venv\Scripts\python.exe`
-- Add arguments: `-X utf8 -u "C:\Users\EMMANUEL\Desktop\telegram-challenger\main.py"`
-- Start in: `C:\Users\EMMANUEL\Desktop\telegram-challenger`
-- If already running: Do not start a new instance.
-- Disable the default setting that stops a task after a fixed number of days. Set restart on failure to one minute with a bounded retry count.
-
-Do not place credentials in task arguments. A background task cannot answer login prompts; use `--login` beforehand. Account supervisors recover individual connections within the running process. For a clean manual stop during development, use the foreground PowerShell command and Ctrl+C. Abrupt process termination still retains conservative send reservations.
-
-## Run continuously on a Linux server
-
-Use a dedicated unprivileged service user, a persistent project directory such as `/opt/telegram-challenger`, Python 3.11+, and a virtual environment with `requirements.txt` installed. Transfer the existing `.env`, sessions, all activity databases and the coordinator together after stopping the old instance. Protect the directory and private files so only the service user can read them; do not put them in an ephemeral container filesystem. Authenticate enabled accounts interactively as that same user before enabling the service.
-
-Example `/etc/systemd/system/telegram-challenger.service`:
-
-```ini
-[Unit]
-Description=Telegram Challenger
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=telegram-challenger
-Group=telegram-challenger
-WorkingDirectory=/opt/telegram-challenger
-ExecStart=/opt/telegram-challenger/.venv/bin/python -u /opt/telegram-challenger/main.py
-Environment=PYTHONUTF8=1
-Restart=on-failure
-RestartSec=60
-KillSignal=SIGTERM
-TimeoutStopSec=60
-UMask=0077
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
+```dotenv
+GROQ_REQUESTS_PER_MINUTE=20
+GROQ_REQUESTS_PER_DAY=1000
+GROQ_TOKENS_PER_MINUTE=10000
+GROQ_TOKENS_PER_DAY=200000
 ```
 
-After installing the unit, use `sudo systemctl daemon-reload` and `sudo systemctl enable --now telegram-challenger`. Inspect logs with `sudo journalctl -u telegram-challenger -f`; stop cleanly with `sudo systemctl stop telegram-challenger`. SIGTERM and Ctrl+C request task cancellation and cleanup. Retain databases and sessions during service restarts and deployment updates.
+These defaults are local budgets, not a claim about your provider plan. Admission is persisted across restarts, including retries. Token reservations use a conservative input-size bound plus maximum completion tokens; provider-reported totals replace estimates when available. Missing usage stays reserved and is marked unreported. The day budget is a conservative rolling 24 hours, while dashboard daily totals use the reporting timezone.
 
-## Validation and limitations
+Selection and reply generation are intentionally combined in one `selection_generation` request, rather than doubling API calls. The ledger records that purpose explicitly. Repeated identical recent analyses are cached for 30 seconds, input snapshots are bounded, 429 backoff is shared, and malformed structured output uses validated compatibility fallbacks. A budget too small for one request prevents that request rather than overspending.
 
-The test suite exercises account configuration, separate paths, session preservation, independent and shared scheduling, preview quotas, cross-account suppression, target/reply duplication, malformed Groq output, busy queues, disconnections, persistent history and cleanup. Tests use fake Telegram clients and HTTP transports and never require real messages or a Groq call.
+## Private web dashboard and Supabase
 
-Conversation intent, factual correctness and dialect matching cannot be guaranteed perfectly. Conservative checks intentionally skip some useful conversations; the participant does not browse for current facts. Unknown identities while accounts are disconnected, unavailable Telegram history, and a reply/edit racing the final network request can limit complete coordination. The coordinator controls this application's actions, not messages sent manually or by unrelated clients; observed manual outgoing text is reconciled when available.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full Supabase setup, owner/worker authorization, Cloudflare deployment and smoke-test checklist. The worker and frontend deploy independently. No Telegram/Groq secret, session, group message text, phone number, sender identity or Telegram message ID is published. Message Activity contains redacted delivery metadata. Settings is read-only; the website cannot send Telegram messages or change worker credentials.
 
-Keep the system clock synchronized. A large forward clock change can distort elapsed-time limits. History and permanent target claims grow with traffic; plan persistent disk space and private backups. Logs contain decisions, target IDs and previews; protect logs along with credentials, sessions, databases and backups. Real authorization, group access, provider availability and model access require a deliberate network run and are not proven by mocked tests.
+The worker publishes a fresh snapshot every five seconds with a one-row durable SQLite outbox. New snapshots replace old pending snapshots, keeping retries bounded and current totals intact. Upload failures do not block Telegram. Supabase Realtime updates the browser with a 15-second polling fallback. Snapshots older than 20 seconds are stale and older than 90 seconds are offline. A fresh fetch of an old snapshot does not mark the worker live.
+
+```powershell
+Set-Location 'C:\Users\EMMANUEL\Desktop\Challenger Ai\dashboard'
+npm ci
+if (-not (Test-Path .env.local)) { Copy-Item .env.example .env.local }
+# Fill the two public Supabase values in .env.local.
+npm run dev
+# Open http://127.0.0.1:5173
+```
+
+Without Supabase configuration, an explicitly labeled empty layout is available. It contains no fabricated activity. With Supabase, sign in using the dashboard owner account, not the worker publisher account.
+
+## Points and analytics
+
+Confirmed outgoing messages, previews, uncertain reservations and awarded points are different data. Potential points are labeled as an unverified estimate of one per confirmed message. Theoretical maxima are 5/hour and 120/day per account, 25/hour and 600/day combined; neither sending nor awards are guaranteed. No contest URL/scoring API was supplied, so no scoring window or award was independently verified.
+
+If you obtain an organizer's verified award export, import it explicitly into existing account state:
+
+```powershell
+& .\.venv\Scripts\python.exe main.py --import-points .\points-private.json --account account_1
+```
+
+File format: `[{"reference":"organizer-export-row-17","awarded_at":1792328400,"points":1}]`. `awarded_at` is a nonfuture Unix timestamp. References are unique per account and imports are idempotent. The command trusts your verification; it does not independently validate the contest or expose evidence references to the dashboard. Without an award import, verified points remain unknown.
+
+## Tests and health
+
+```powershell
+Set-Location 'C:\Users\EMMANUEL\Desktop\Challenger Ai'
+& .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -q
+Set-Location .\dashboard
+npm test
+npm run build
+npx playwright test
+npm audit
+```
+
+The browser test runs synthetic five-account workers through real SQLite and the telemetry publisher, executes the publisher RPC and owner read against embedded PostgreSQL, then renders the resulting data in Microsoft Edge on Windows. Telegram, Groq decisions and Supabase HTTP/Auth are mocked; it sends nothing to Telegram. For non-Windows machines, install Chromium using `npx playwright install chromium`. Database policy tests execute the actual migration in embedded PostgreSQL (PGlite), with a minimal Supabase auth-role fixture. They exercise owner isolation, publisher authorization, anonymous denial and timestamp validation. Hosted Supabase Auth/Realtime and Cloudflare deployment still require configured project access and a separate deployment smoke test.
+
+For Windows Task Scheduler, use one task with program `C:\Users\EMMANUEL\Desktop\Challenger Ai\.venv\Scripts\python.exe`, arguments `-X utf8 -u "C:\Users\EMMANUEL\Desktop\Challenger Ai\main.py"`, and Start in `C:\Users\EMMANUEL\Desktop\Challenger Ai`. Choose "Do not start a new instance". Authenticate first; background tasks cannot answer login prompts. Ctrl+C or SIGTERM closes clients and leaves persistent reservations intact.
+
+## Changed areas
+
+`challenger/config.py`, `storage.py`, `coordinator.py`, `engine.py`, `telegram_app.py`, `groq_client.py`, `selection.py`, `application.py` and `main.py` extend the existing worker. New modules are `windows.py`, `discussions.py`, `usage.py`, `reporting.py`, `diagnostics.py` and `telemetry.py`. `dashboard/` contains React/Vite/Tailwind, tests and deployment headers; `supabase/migrations/` contains the database policy and publisher RPC. Templates, requirements, tests and documentation are updated. Existing authentication and session-preservation code is retained.

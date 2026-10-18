@@ -13,11 +13,11 @@ from challenger.storage import Store
 
 TOPICS = [
     ("What time does the group meeting start?", "The meeting starts at eight tonight", "It starts at eight tonight"),
-    ("Where is the parcel collection point?", "The parcel collection point is the gate", "The collection point is the gate"),
+    ("Where is the parcel collection point?", "The parcel collection point is the gate", "Collection point is the gate"),
     ("What caused the transfer fee change?", "The transfer fee changed because network charges increased", "The network charges increased"),
-    ("Where will the football match happen?", "The football match is at the stadium", "The match is at the stadium"),
-    ("What does the rent notice mention?", "The rent notice includes water payments", "The rent includes water payments"),
-    ("Which room has the library books?", "The library books are in room three", "The books are in room three"),
+    ("Where will the football match happen?", "The football match is at the stadium", "Match is at the stadium"),
+    ("What does the rent notice mention?", "The rent notice includes water payments", "Rent includes water payments"),
+    ("Which room has the library books?", "The library books are in room three", "Books are in room three"),
 ]
 
 
@@ -56,7 +56,7 @@ class HourlyOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(single, "min_gap"))
         self.assertFalse(hasattr(app.accounts[0], "min_gap"))
         self.assertFalse(hasattr(app, "group_min_gap"))
-        self.assertEqual(app.group_max_actions, 5)
+        self.assertEqual(app.group_max_actions, 25)
 
     async def test_two_valid_replies_seconds_apart_five_cap_and_restart_in_both_modes(self):
         for live in (False, True):

@@ -13,9 +13,10 @@ from telethon.errors import FloodWaitError
 
 from .config import Settings
 from .engine import Refresh, TelegramBackoff, Worker
-from .groq_client import GroqDecider
+from .groq_client import GroqDecider, PersonaDecider
 from .models import Identity, Message
 from .storage import Store
+from .windows import day_start
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ def convert_message(message, chat_id: int, parents: dict | None = None) -> Messa
     parent_id = getattr(message, "reply_to_msg_id", None)
     parent = (parents or {}).get(parent_id)
     text = getattr(message, "raw_text", "") or ""
+    if not text.strip() and getattr(message, "out", False):
+        text = "[Non-text message]"
     mentioned_ids = tuple(entity.user_id for entity in (getattr(message, "entities", None) or [])
                           if isinstance(entity, types.MessageEntityMentionName))
     return Message(
@@ -60,12 +63,14 @@ class TelethonGateway:
     async def outgoing(self):
         result = []
         scanned = 0
+        # Reconcile today's manual activity as well as the rolling-hour tail
+        # across midnight, so daily totals include offline-device sends.
+        since = min(time.time() - 3600, day_start(time.time(), self.settings.timezone))
         async for message in self.client.iter_messages(self.settings.chat_id, from_user=self.identity.user_id, limit=300):
             scanned += 1
-            if timestamp(message.date) <= time.time() - 3600:
+            if timestamp(message.date) < since:
                 break
-            if (message.raw_text or "").strip():
-                result.append(message)
+            result.append(message)
         if scanned >= 300:
             raise RuntimeError("Outgoing history could not be fully verified")
         return result
@@ -102,7 +107,7 @@ class TelethonGateway:
         except FloodWaitError as exc:
             raise TelegramBackoff(exc.seconds) from None
 
-    async def send(self, text: str, target_id: int) -> Message:
+    async def send(self, text: str, target_id: int | None) -> Message:
         try:
             sent = await asyncio.wait_for(self.client.send_message(
                 self.settings.chat_id, text, reply_to=target_id,
@@ -148,9 +153,10 @@ async def run(settings: Settings, *, shared_decider=None, coordinator=None,
     from .auth import session_file
     with instance_lock(session_file(settings.session_path).with_suffix(".challenger.lock")):
         store = Store(settings.database_path, settings.account_id, settings.chat_id,
-                      max_actions=settings.max_actions, max_age=settings.max_age)
+                      max_actions=settings.max_actions, max_age=settings.max_age,
+                      window_mode=settings.window_mode, timezone=settings.timezone)
         client = decider = worker = None
-        worker_task = disconnect_task = None
+        worker_task = disconnect_task = health_task = None
         try:
             client = TelegramClient(str(settings.session_path), settings.api_id, settings.api_hash,
                                     request_retries=0, flood_sleep_threshold=0,
@@ -218,19 +224,33 @@ async def run(settings: Settings, *, shared_decider=None, coordinator=None,
                               settings.account_id, settings.chat_id, actual_chat)
                     raise ValueError("TARGET_CHAT_ID must match the Telegram marked group ID")
             gateway = TelethonGateway(client, settings, identity)
-            worker = Worker(settings, store, identity, decider, gateway, coordinator=coordinator)
+            worker = Worker(settings, store, identity, PersonaDecider(decider, settings), gateway, coordinator=coordinator)
             try:
                 for message in await gateway.sync():
                     worker.ingest(message)
+                store.set_state("last_sync", time.time())
             except TelegramBackoff as exc:
                 worker._block_telegram(exc)
             except Exception as exc:
                 store.set_block("telegram", time.time() + 60)
                 log.warning("Startup history unavailable (%s); retry deferred, queue retained",
                             type(exc).__name__)
-            log.info("Ready account=%s mode=%s model=%s cap=%s/rolling-hour (no fixed gap)",
+            log.info("Ready account=%s mode=%s model=%s cap=%s/%s-hour (no fixed gap)",
                      settings.account_id, "LIVE" if settings.auto_send else "PREVIEW",
-                     settings.groq_model, settings.max_actions)
+                     settings.groq_model, settings.max_actions, settings.window_mode)
+            async def health_loop():
+                connected_before = True
+                while True:
+                    connected = client.is_connected()
+                    store.set_state("heartbeat", time.time())
+                    store.set_state("health", "connected" if connected else "reconnecting")
+                    if connected and not connected_before:
+                        # No generation after reconnect until history is reconciled.
+                        worker.next_history_sync = 0
+                        worker.wake.set()
+                    connected_before = connected
+                    await asyncio.sleep(5)
+            health_task = asyncio.create_task(health_loop())
             worker_task = asyncio.create_task(worker.run())
             disconnect_task = asyncio.create_task(client.run_until_disconnected())
             done, _ = await asyncio.wait([worker_task, disconnect_task], return_when=asyncio.FIRST_COMPLETED)
@@ -240,10 +260,12 @@ async def run(settings: Settings, *, shared_decider=None, coordinator=None,
             store.set_block("telegram", time.time() + exc.seconds)
             log.error("Telegram requires %.0fs wait; saved across restarts", exc.seconds)
         finally:
-            for task in (worker_task, disconnect_task):
+            for task in (worker_task, disconnect_task, health_task):
                 if task is not None:
                     task.cancel()
-            await asyncio.gather(*(t for t in (worker_task, disconnect_task) if t is not None), return_exceptions=True)
+            await asyncio.gather(*(t for t in (worker_task, disconnect_task, health_task) if t is not None), return_exceptions=True)
+            store.set_state("health", "offline")
+            store.set_state("heartbeat", time.time())
             try:
                 if client is not None:
                     await client.disconnect()

@@ -2,14 +2,18 @@
 import asyncio
 import logging
 import time
+import os
+from dataclasses import replace
 
-from .auth import AuthenticationRequired, authenticate, prepare_account
+from .auth import AuthenticationRequired, LoginError, authenticate, prepare_account
 from .config import ApplicationSettings, Settings
 from .coordinator import Coordinator
 from .engine import TelegramBackoff
 from .groq_client import GroqConfigurationError, SharedGroqDecider
 from .storage import Store
 from .telegram_app import instance_lock, run as run_account
+from .usage import UsageLedger
+from .diagnostics import DiagnosticHandler
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +30,8 @@ def validate_live_readiness(settings: ApplicationSettings) -> None:
 def import_history(account: Settings, coordinator: Coordinator) -> float:
     prepare_account(account)
     store = Store(account.database_path, account.account_id, account.chat_id,
-                  max_actions=account.max_actions, max_age=account.max_age)
+                  max_actions=account.max_actions, max_age=account.max_age,
+                  window_mode=account.window_mode, timezone=account.timezone)
     try:
         coordinator.import_activity(account.account_id, account.chat_id, store.export_actions(time.time()))
         return store.blocked_until("telegram")
@@ -87,10 +92,21 @@ async def run_application(app: ApplicationSettings) -> None:
     # All launch commands sharing this state must use one coordinator process.
     # Account locks additionally protect individual Telegram session files.
     with instance_lock(app.coordinator_path.with_suffix(".coordinator.lock")):
-        coordinator = Coordinator(app.coordinator_path, app.group_max_actions)
+        coordinator = Coordinator(app.coordinator_path, app.group_max_actions,
+                                  app.accounts[0].window_mode, app.accounts[0].timezone)
+        ledger = UsageLedger(app.coordinator_path, app.groq_rpm, app.groq_rpd, app.groq_tpm, app.groq_tpd)
+        diagnostics = DiagnosticHandler(app.coordinator_path)
+        logging.getLogger().addHandler(diagnostics)
+        telemetry_task = None
         decider = None
         tasks = []
         try:
+            if os.getenv("TELEMETRY_ENABLED", "false").lower() == "true":
+                from .telemetry import Publisher
+                try:
+                    telemetry_task = asyncio.create_task(Publisher(app).run())
+                except ValueError:
+                    log.warning("Telemetry configuration incomplete; local worker continues")
             known = set()
             eligible = []
             # Sequential, noninteractive identity discovery completes before any
@@ -123,12 +139,15 @@ async def run_application(app: ApplicationSettings) -> None:
                 return
             first = app.accounts[0]
             decider = SharedGroqDecider(first.groq_api_key, first.groq_model, coordinator,
-                                       concurrency=app.groq_concurrency)
+                                       concurrency=app.groq_concurrency, ledger=ledger)
             tasks = [asyncio.create_task(supervise(account, app, coordinator, decider,
                                                   identity_known=account.account_id in known),
                                          name=f"challenger-{account.account_id}") for account in eligible]
             await asyncio.gather(*tasks)
         finally:
+            if telemetry_task is not None:
+                telemetry_task.cancel()
+                await asyncio.gather(telemetry_task, return_exceptions=True)
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -137,6 +156,9 @@ async def run_application(app: ApplicationSettings) -> None:
                     await decider.aclose()
             finally:
                 coordinator.close()
+                ledger.close()
+                logging.getLogger().removeHandler(diagnostics)
+                diagnostics.close()
 
 
 async def login_account(app: ApplicationSettings, account_id: str) -> None:
@@ -144,11 +166,20 @@ async def login_account(app: ApplicationSettings, account_id: str) -> None:
     if account is None:
         raise ValueError("Enable the requested account slot in .env before explicitly logging it in")
     # This command authenticates only. It never starts group workers or Groq.
-    identity = await authenticate(account, interactive=True)
+    identity = await authenticate(replace(account, auto_send=False), interactive=True)
     app.coordinator_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     coordinator = Coordinator(app.coordinator_path, app.group_max_actions)
     try:
         coordinator.register(account.account_id, identity.user_id)
     finally:
         coordinator.close()
-    log.info("Authenticated %s; no group worker started", account.account_id)
+    print(f"[{account.account_id}] Authentication successful; session saved. No group worker started.", flush=True)
+
+
+async def login_accounts(app: ApplicationSettings, account_ids: tuple[str, ...]) -> None:
+    """Authenticate in order; stop on failure so no further codes are requested."""
+    for account_id in account_ids:
+        try:
+            await login_account(app, account_id)
+        except LoginError as exc:
+            raise LoginError(f"{account_id}: {exc}") from None

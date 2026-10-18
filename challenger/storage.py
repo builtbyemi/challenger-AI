@@ -13,6 +13,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from .models import Message
+from .windows import window_start
 
 LOG = logging.getLogger(__name__)
 _SCHEMA_VERSION = "1"
@@ -33,12 +34,16 @@ class Store:
         chat_id: int,
         max_actions: int = 5,
         max_age: int = 720,
+        window_mode: str = "rolling",
+        timezone: str = "Africa/Lagos",
     ) -> None:
         self.path = str(path)
         self.account_id = str(account_id)
         self.chat_id = int(chat_id)
         self.max_actions = max(1, min(5, int(max_actions)))
         self.max_age = max(1, int(max_age))
+        self.window_mode, self.timezone = window_mode, timezone
+        window_start(0, window_mode, timezone)
         self._con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA busy_timeout = 10000")
@@ -297,7 +302,7 @@ class Store:
 
     def recent_replies(self, now: float, limit: int = 50) -> list[str]:
         rows = self._con.execute(
-            """SELECT text FROM tc_actions WHERE account_id=? AND kind='REPLY'
+            """SELECT text FROM tc_actions WHERE account_id=? AND kind IN ('REPLY','START_DISCUSSION')
                AND activity_at>=? ORDER BY activity_at DESC LIMIT ?""",
             (self.account_id, now - 7 * 86400, max(0, limit)),
         ).fetchall()
@@ -306,15 +311,17 @@ class Store:
     def quota_remaining(self, now: float) -> int:
         used = self._con.execute(
             """SELECT COUNT(*) FROM tc_actions WHERE account_id=?
-               AND kind='REPLY' AND status!='rejected' AND activity_at>?""",
-            (self.account_id, now - 3600),
+               AND kind IN ('REPLY','START_DISCUSSION') AND status!='rejected' AND activity_at>=?""",
+            (self.account_id, self._window_boundary(now)),
         ).fetchone()[0]
         return max(0, self.max_actions - used)
 
     def quota_wait(self, now: float) -> float:
+        if self.window_mode == "fixed":
+            return max(0, window_start(now, "fixed", self.timezone) + 3600 - now) if self.quota_remaining(now) == 0 else 0
         rows = self._con.execute(
             """SELECT activity_at FROM tc_actions WHERE account_id=?
-               AND kind='REPLY' AND status!='rejected'
+               AND kind IN ('REPLY','START_DISCUSSION') AND status!='rejected'
                ORDER BY activity_at DESC LIMIT ?""",
             (self.account_id, self.max_actions),
         ).fetchall()
@@ -322,6 +329,41 @@ class Store:
             return 0.0
         hourly = rows[-1][0] + 3600 - now if len(rows) == self.max_actions else 0.0
         return max(0.0, hourly)
+
+    def _window_boundary(self, now: float) -> float:
+        import math
+        boundary = window_start(now, self.window_mode, self.timezone)
+        return math.nextafter(boundary, math.inf) if self.window_mode == "rolling" else boundary
+
+    def reserve_start(self, text: str, mode: str, now: float) -> int | None:
+        if mode not in {"live", "preview"} or not text.strip():
+            raise ValueError("Invalid discussion reservation")
+        with self._transaction():
+            if self.quota_wait(now) or self._con.execute(
+                "SELECT 1 FROM tc_blocks WHERE account_id=? AND until>?", (self.account_id, now)
+            ).fetchone():
+                return None
+            cursor = self._con.execute(
+                """INSERT INTO tc_actions(account_id,chat_id,text,kind,mode,reserved_at,activity_at,status)
+                   VALUES (?,?,?,'START_DISCUSSION',?,?,?,'reserved')""",
+                (self.account_id, self.chat_id, text, mode, now, now))
+            return int(cursor.lastrowid)
+
+    def discussion_context(self, now: float) -> list[Message]:
+        rows = self._con.execute(
+            """SELECT * FROM tc_messages WHERE account_id=? AND chat_id=? AND sent_at>?
+               ORDER BY sent_at DESC,message_id DESC LIMIT 100""",
+            (self.account_id, self.chat_id, now - 86400)).fetchall()
+        return [self._decode(row) for row in reversed(rows)]
+
+    def set_state(self, key: str, value: str) -> None:
+        self._con.execute("INSERT OR REPLACE INTO tc_metadata(key,value) VALUES (?,?)",
+                          (f"{self.account_id}:{key}", str(value)))
+
+    def get_state(self, key: str, default: str = "") -> str:
+        row = self._con.execute("SELECT value FROM tc_metadata WHERE key=?",
+                                (f"{self.account_id}:{key}",)).fetchone()
+        return row[0] if row else default
 
     def reserve(self, message: Message, text: str, mode: str, now: float) -> int | None:
         if mode not in ("live", "preview"):
@@ -361,6 +403,18 @@ class Store:
             ).fetchone()
             if row is None:
                 raise ValueError("Unknown action for this account/chat")
+            if telegram_id is not None and row["telegram_id"] is not None and telegram_id != row["telegram_id"]:
+                # A manual send can exactly match an in-flight bot message.
+                # The returned ID proves they were distinct: restore the earlier
+                # observation as manual instead of silently overwriting its ID.
+                old = self._row(row["telegram_id"])
+                old_at = old["sent_at"] if old else row["activity_at"]
+                self._con.execute("UPDATE tc_actions SET telegram_id=NULL WHERE id=?", (action_id,))
+                self._con.execute(
+                    """INSERT INTO tc_actions(account_id,chat_id,source_id,text,kind,mode,reserved_at,activity_at,status,telegram_id)
+                       VALUES (?,?,?,?,'REPLY','observed',?,?,'sent',?)""",
+                    (self.account_id, self.chat_id, old["reply_to_id"] if old else row["source_id"],
+                     row["text"], old_at, old_at, row["telegram_id"]))
             if telegram_id is not None:
                 observed = self._con.execute(
                     """SELECT id,mode,activity_at FROM tc_actions WHERE account_id=?
@@ -409,8 +463,18 @@ class Store:
                     """SELECT id,source_id FROM tc_actions WHERE account_id=? AND chat_id=?
                        AND source_id=? AND text=? AND telegram_id IS NULL AND mode!='preview'
                        AND kind='REPLY' AND status IN ('reserved','sent','uncertain')
+                       AND reserved_at BETWEEN ? AND ?
                        ORDER BY reserved_at DESC LIMIT 1""",
-                    (self.account_id, self.chat_id, message.reply_to_id, message.text),
+                    (self.account_id, self.chat_id, message.reply_to_id, message.text,
+                     message.sent_at - 120, message.sent_at + 30),
+                ).fetchone()
+            else:
+                reservation = self._con.execute(
+                    """SELECT id,source_id FROM tc_actions WHERE account_id=? AND chat_id=?
+                       AND kind='START_DISCUSSION' AND source_id IS NULL AND text=?
+                       AND telegram_id IS NULL AND mode='live' AND status IN ('reserved','uncertain')
+                       AND reserved_at BETWEEN ? AND ? ORDER BY reserved_at DESC LIMIT 1""",
+                    (self.account_id, self.chat_id, message.text, message.sent_at - 120, message.sent_at + 30)
                 ).fetchone()
             if reservation:
                 self._con.execute(

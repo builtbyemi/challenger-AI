@@ -1,0 +1,15 @@
+"""Explicit quota boundaries. Fixed windows use the selected reporting timezone."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def window_start(now: float, mode: str = "rolling", timezone: str = "Africa/Lagos") -> float:
+    if mode == "rolling":
+        return now - 3600
+    if mode != "fixed":
+        raise ValueError("Unknown hourly window mode")
+    return datetime.fromtimestamp(now, ZoneInfo(timezone)).replace(minute=0, second=0, microsecond=0).timestamp()
+
+
+def day_start(now: float, timezone: str) -> float:
+    return datetime.fromtimestamp(now, ZoneInfo(timezone)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()

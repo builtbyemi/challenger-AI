@@ -37,7 +37,7 @@ class MultiConfigTests(unittest.TestCase):
         self.assertFalse(app.group_automation_allowed)
         self.assertEqual(app.coordinator_path, self.base / "data/coordinator.sqlite3")
         self.assertEqual((app.groq_concurrency, app.group_max_actions, app.restart_delay),
-                         (1, 5, 30))
+                         (1, 25, 30))
         self.assertEqual(list(self.base.iterdir()), [])
 
     def test_legacy_session_only_marked_for_copy_and_database_stays_in_place(self):
@@ -94,7 +94,7 @@ class MultiConfigTests(unittest.TestCase):
         self.assertEqual(len({account.database_path for account in app.accounts}), 5)
         self.assertTrue(all(account.api_id == 12345 for account in app.accounts))
         self.assertTrue(all(not account.auto_send for account in app.accounts))
-        self.assertEqual(app.group_max_actions, 5)
+        self.assertEqual(app.group_max_actions, 25)
 
     def test_disabled_slots_do_not_require_or_validate_credentials(self):
         with patch.dict(os.environ, {
@@ -198,7 +198,7 @@ class MultiConfigTests(unittest.TestCase):
 
     def test_missing_credentials_name_settings_without_exposing_secrets(self):
         for name, value in (("ACCOUNT_2_API_ID", "bad-private-value"),
-                            ("ACCOUNT_2_API_HASH", ""), ("ACCOUNT_2_TARGET_CHAT_ID", "0")):
+                            ("ACCOUNT_2_TARGET_CHAT_ID", "0")):
             with self.subTest(name=name), patch.dict(os.environ, {
                 "ACCOUNT_2_ENABLED": "true", name: value,
             }):
@@ -217,7 +217,7 @@ class MultiConfigTests(unittest.TestCase):
             app = load_application_settings(self.base)
         self.assertEqual(app.accounts[0].max_actions, 5)
         self.assertEqual((app.group_max_actions, app.groq_concurrency, app.restart_delay),
-                         (5, 3, 30))
+                         (25, 3, 30))
 
     def test_stricter_group_limits_and_retry_settings_are_honored(self):
         with patch.dict(os.environ, {

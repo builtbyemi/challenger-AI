@@ -97,7 +97,7 @@ class CoordinatorTests(unittest.TestCase):
         self.reserve(chat_id=-200)
         another = Coordinator(self.path, max_actions=99)
         try:
-            self.assertEqual(another.max_actions, 5)
+            self.assertEqual(another.max_actions, 25)
             self.assertFalse(hasattr(another, "min_gap"))
         finally:
             another.close()

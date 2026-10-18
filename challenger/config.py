@@ -27,6 +27,12 @@ class Settings:
     # inspection remains read-only, and the original session is never moved.
     legacy_session_path: Path | None = None
     automation_disclosed: bool = False
+    persona: str = "Casual Nigerian Pidgin, relaxed and funny; match the conversation's language"
+    window_mode: str = "rolling"
+    timezone: str = "Africa/Lagos"
+    max_reply_words: int = 5
+    quiet_seconds: int = 900
+    discussion_topics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,9 +40,39 @@ class ApplicationSettings:
     accounts: tuple[Settings, ...]
     coordinator_path: Path
     groq_concurrency: int = 1
-    group_max_actions: int = 5
+    group_max_actions: int = 25
     restart_delay: int = 30
     group_automation_allowed: bool = False
+    groq_rpm: int = 20
+    groq_rpd: int = 1000
+    groq_tpm: int = 10000
+    groq_tpd: int = 200000
+
+
+PERSONAS = (
+    "Casual Nigerian Pidgin, relaxed and funny; match the conversation's language",
+    "Friendly conversational English",
+    "Playful and witty, occasional emojis",
+    "Calm, thoughtful and observant",
+    "Energetic and social, light slang",
+)
+
+
+def _window_mode() -> str:
+    mode = os.getenv("HOURLY_WINDOW_MODE", "rolling").strip().lower()
+    if mode not in {"rolling", "fixed"}:
+        raise ValueError("HOURLY_WINDOW_MODE must be rolling or fixed")
+    return mode
+
+
+def _timezone() -> str:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    name = os.getenv("REPORT_TIMEZONE", "Africa/Lagos").strip()
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("REPORT_TIMEZONE must be an IANA timezone; install tzdata") from None
+    return name
 
 
 def load_settings(base: Path) -> Settings:
@@ -73,6 +109,9 @@ def load_settings(base: Path) -> Settings:
         batch_size=max(1, min(50, number("BATCH_SIZE", "20"))),
         max_age=max(60, min(720, number("MAX_PENDING_AGE_SECONDS", "720"))),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        window_mode=_window_mode(), timezone=_timezone(),
+        quiet_seconds=max(300, number("QUIET_PERIOD_SECONDS", "900")),
+        discussion_topics=tuple(t.strip() for t in os.getenv("DISCUSSION_TOPICS", "").split(";") if t.strip()),
     )
     if settings.api_id <= 0 or not settings.api_hash or not settings.chat_id:
         raise ValueError("Missing API_ID, API_HASH or TARGET_CHAT_ID in .env")
@@ -117,7 +156,7 @@ def _canonical(path: Path) -> str:
     return os.path.normcase(str(path.resolve()))
 
 
-def load_application_settings(base: Path) -> ApplicationSettings:
+def load_application_settings(base: Path, *, login_accounts: tuple[str, ...] = ()) -> ApplicationSettings:
     """Read up to five independent slots without touching sessions or databases.
 
     Only slot one is enabled by default. Its legacy ACCOUNT_ID and database are
@@ -132,6 +171,14 @@ def load_application_settings(base: Path) -> ApplicationSettings:
             raise ValueError("Only ACCOUNT_1 through ACCOUNT_5 can be enabled")
     enabled = [slot for slot in range(1, 6)
                if _boolean(f"ACCOUNT_{slot}_ENABLED", "true" if slot == 1 else "false")]
+    for account in login_accounts:
+        legacy_account = os.getenv("ACCOUNT_ID", "account_1").strip()
+        if account != legacy_account and not re.fullmatch(r"account_[1-5]", account):
+            raise ValueError("Login account must be account_1 through account_5")
+        slot = 1 if account == legacy_account else int(account[-1])
+        if slot not in enabled:
+            enabled.append(slot)
+    enabled.sort()
     if not enabled:
         raise ValueError("At least one ACCOUNT_1_ENABLED through ACCOUNT_5_ENABLED must be true")
 
@@ -144,12 +191,15 @@ def load_application_settings(base: Path) -> ApplicationSettings:
         raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING or ERROR")
     common = dict(
         groq_api_key=api_key, groq_model=model,
-        auto_send=_boolean("AUTO_SEND", "false"),
+        auto_send=False if login_accounts else _boolean("AUTO_SEND", "false"),
         max_actions=max(1, min(5, _number("MAX_ACTIONS_PER_HOUR", "5"))),
         batch_delay=max(1, min(60, _number("BATCH_DELAY_SECONDS", "5"))),
         batch_size=max(1, min(50, _number("BATCH_SIZE", "20"))),
         max_age=max(60, min(720, _number("MAX_PENDING_AGE_SECONDS", "720"))),
         log_level=log_level,
+        window_mode=_window_mode(), timezone=_timezone(), max_reply_words=5,
+        quiet_seconds=max(300, _number("QUIET_PERIOD_SECONDS", "900")),
+        discussion_topics=tuple(t.strip() for t in os.getenv("DISCUSSION_TOPICS", "").split(";") if t.strip()),
     )
     accounts = []
     for slot in enabled:
@@ -158,10 +208,12 @@ def load_application_settings(base: Path) -> ApplicationSettings:
         if not account or not re.fullmatch(r"[A-Za-z0-9_-]+", account):
             raise ValueError("ACCOUNT_ID must contain letters, numbers, hyphens or underscores")
 
-        # An explicitly supplied empty override is invalid, rather than silently
-        # authenticating another account with fallback credentials.
+        # API credentials identify the application. Empty per-slot placeholders
+        # inherit shared credentials; phone login still identifies each user.
         def key(suffix: str) -> str:
             specific = prefix + suffix
+            if suffix in {"API_ID", "API_HASH"} and not os.getenv(specific, "").strip():
+                return suffix
             return specific if specific in os.environ else suffix
 
         api_id_name, api_hash_name, chat_name = key("API_ID"), key("API_HASH"), key("TARGET_CHAT_ID")
@@ -201,6 +253,7 @@ def load_application_settings(base: Path) -> ApplicationSettings:
             api_id=api_id, api_hash=api_hash, chat_id=chat_id, account_id=account,
             session_path=session, database_path=database,
             legacy_session_path=legacy_session,
+            persona=PERSONAS[slot - 1],
             automation_disclosed=_boolean(key("AUTOMATION_DISCLOSED"), "false"), **common,
         ))
 
@@ -224,7 +277,11 @@ def load_application_settings(base: Path) -> ApplicationSettings:
     return ApplicationSettings(
         accounts=tuple(accounts), coordinator_path=coordinator,
         groq_concurrency=max(1, min(3, _number("GROQ_CONCURRENCY", "1"))),
-        group_max_actions=max(1, min(5, _number("GROUP_MAX_ACTIONS_PER_HOUR", "5"))),
+        group_max_actions=max(1, min(25, _number("GROUP_MAX_ACTIONS_PER_HOUR", "25"))),
         restart_delay=max(30, _number("ACCOUNT_RESTART_DELAY_SECONDS", "30")),
         group_automation_allowed=_boolean("GROUP_AUTOMATION_ALLOWED", "false"),
+        groq_rpm=max(1, _number("GROQ_REQUESTS_PER_MINUTE", "20")),
+        groq_rpd=max(1, _number("GROQ_REQUESTS_PER_DAY", "1000")),
+        groq_tpm=max(1, _number("GROQ_TOKENS_PER_MINUTE", "10000")),
+        groq_tpd=max(1, _number("GROQ_TOKENS_PER_DAY", "200000")),
     )

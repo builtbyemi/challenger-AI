@@ -159,6 +159,37 @@ def _substantive_answer(message: Message) -> bool:
     return len(_words(text)) >= 2 and not _ACK.fullmatch(text) and not is_question(_question_text(message))
 
 
+def is_welcome_notice(message: Message) -> bool:
+    """Only plain arrival announcements, including those posted by welcome bots."""
+    text = _clean(message.text)
+    return (len(text) <= 250 and not message.forwarded and not _PROMOTION.search(text)
+            and bool(re.fullmatch(
+                r"welcome\b[^.!?\n]{0,180}\bto (?:the |this |our )?(?:group|community)[.! ]*",
+                text, re.I)))
+
+
+def welcome_history_reason(message: Message, recent_replies: list[str]) -> str | None:
+    if is_welcome_notice(message) and any(re.search(r"\bwelcome\b", text, re.I)
+                                          for text in recent_replies[-5:]):
+        return "Welcome already sent among the last five replies"
+    return None
+
+
+def _shared_discussion(message: Message, context: list[Message], identity: Identity) -> bool:
+    """Three people discussing the topic is evidence of a public group thread."""
+    topics = _topic_words(message.text)
+    participants = {message.sender_id}
+    for item in context:
+        if (item.chat_id == message.chat_id and abs(item.sent_at - message.sent_at) <= 120
+                and item.sender_id not in (None, identity.user_id)
+                and not (item.is_bot or item.outgoing or item.forwarded)
+                and not (_mentions(item) or item.mentioned_ids or _PROMOTION.search(item.text))
+                and not re.search(r"\b(?:you|your)\b", item.text, re.I)
+                and len(_words(item.text)) >= 4 and topics & _topic_words(item.text)):
+            participants.add(item.sender_id)
+    return len(participants - {None}) >= 3
+
+
 def _discussion_reason(message: Message, context: list[Message], identity: Identity, now: float) -> str | None:
     """Permit substantive statements in an active, open discussion."""
     topics = _topic_words(message.text)
@@ -172,7 +203,8 @@ def _discussion_reason(message: Message, context: list[Message], identity: Ident
                 or abs(item.sent_at - message.sent_at) > 120
                 or item.sender_id in (None, identity.user_id, message.sender_id)
                 or item.is_bot or item.outgoing or item.forwarded
-                or item.reply_to_id is not None or _mentions(item) or item.mentioned_ids
+                or (item.reply_to_id is not None and not _shared_discussion(message, context, identity))
+                or _mentions(item) or item.mentioned_ids
                 or re.search(r"\b(?:you|your)\b", item.text, re.I)
                 or len(_words(item.text)) < 4
                 or _ACK.fullmatch(_clean(item.text)) or _GENERIC.search(item.text)
@@ -199,7 +231,8 @@ def skip_reason(
         return "Score-farming or leaderboard participation is not a conversation target"
     if message.outgoing or message.sender_id == identity.user_id:
         return "Own message"
-    if message.is_bot or message.forwarded:
+    welcome = is_welcome_notice(message)
+    if message.forwarded or (message.is_bot and not welcome):
         return "Bot or forwarded message"
     if message.sent_at > now + 30 or now - message.sent_at >= max_age:
         return "Expired or invalid message timestamp"
@@ -209,13 +242,22 @@ def skip_reason(
         return "Incomplete or fragmentary message"
     if _ACK.fullmatch(text) or _PROMOTION.search(text):
         return "Acknowledgment or promotion"
+    if welcome:
+        if now - message.sent_at > 120:
+            return "Welcome notice is no longer timely"
+        if any(item.chat_id == message.chat_id and item.message_id != message.message_id
+               and item.sent_at >= message.sent_at and not item.is_bot
+               and re.search(r"\bwelcome\b", item.text, re.I) for item in context):
+            return "Another member already welcomed the arrival"
+        return None
     own_username = identity.username.lower().lstrip("@")
     if _mentions(message) - ({own_username} if own_username else set()):
         return "Message mentions another member"
     if set(message.mentioned_ids) - {identity.user_id}:
         return "Message addresses another member"
     direct = directly_addressed(message, identity)
-    if message.reply_to_id is not None and message.reply_to_sender_id != identity.user_id:
+    shared = _shared_discussion(message, context, identity)
+    if message.reply_to_id is not None and message.reply_to_sender_id != identity.user_id and not shared:
         return "Reply in another member's conversation"
     bot_question = is_direct_bot_question(message, identity)
     if _BOT.search(text) or bot_question:
@@ -263,7 +305,7 @@ def skip_reason(
             if overlapping or (re.search(r"^(?:it(?:'s| is)|they(?:'re| are)|the answer is|at\s+\d)", item.text, re.I)
                                and len(same_chat) <= 12):
                 return "Nearby topic answer already exists"
-    if not direct and not _GROUP_ADDRESS.search(text):
+    if not direct and not shared and not _GROUP_ADDRESS.search(text):
         nearby = [item for item in same_chat if 0 <= message.sent_at - item.sent_at <= 120]
         interlocutors = {
             item.reply_to_sender_id for item in nearby
@@ -297,6 +339,7 @@ def validate_decision(
     *,
     now: float | None = None,
     max_age: float = 720,
+    max_words: int = 10,
 ) -> Decision:
     """Fail closed on malformed, mistargeted, repetitive or unsuitable output."""
     if not isinstance(raw, dict) or set(raw) != {"action", "target_id", "text", "emoji", "reason"}:
@@ -318,6 +361,9 @@ def validate_decision(
     rejected = skip_reason(target, context, identity, time.time() if now is None else now, max_age)
     if rejected:
         return _ignore(rejected)
+    rejected = welcome_history_reason(target, recent_replies)
+    if rejected:
+        return _ignore(rejected)
     if type(text) is not str or not text.strip() or len(text) > 180:
         return _ignore("Invalid reply text")
     if emoji is not None and (type(emoji) is not str or emoji not in ALLOWED_EMOJI):
@@ -329,8 +375,8 @@ def validate_decision(
         # This exception is deliberately fixed, truthful and language matched.
         text = bot_reply(target)
         emoji = None
-    if not 3 <= len(_words(text)) <= 10:
-        return _ignore("Reply must contain 3–10 words")
+    if not 3 <= len(_words(text)) <= max_words:
+        return _ignore(f"Reply must contain 3–{max_words} words")
     embedded = [character for character in text if character in ALLOWED_EMOJI]
     if len(embedded) + (1 if emoji else 0) > 1:
         return _ignore("Too many emojis")
@@ -350,9 +396,12 @@ def validate_decision(
         return _ignore("Forced Pidgin on an English message")
     if _PIDGIN.search(target.text) and not _PIDGIN.search(text):
         return _ignore("Reply does not match the selected message's Pidgin")
-    if any(_similar(text, previous) for previous in recent_replies):
+    welcome = is_welcome_notice(target)
+    if welcome and not re.fullmatch(r"welcome to (?:this|the) (?:community|group)", text, re.I):
+        return _ignore("Welcome reply must be a short arrival greeting")
+    if any(_similar(text, previous) for previous in (recent_replies[-5:] if welcome else recent_replies)):
         return _ignore("Repeated or near-duplicate reply")
-    if _similar(text, target.text):
+    if not welcome and _similar(text, target.text):
         return _ignore("Reply merely repeats the selected message")
     asking = is_question(text) or bool(re.match(r"^you mean\b", text, re.I))
     if "?" in text and not asking:
@@ -364,7 +413,7 @@ def validate_decision(
     source_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", source))
     if set(re.findall(r"\d+(?:[.,]\d+)*", text)) - source_numbers:
         return _ignore("Reply introduces an unsupported number")
-    if not is_direct_bot_question(target, identity):
+    if not welcome and not is_direct_bot_question(target, identity):
         if re.search(r"\b(?:i|i'm|i've|my|we|we're|we've|our|me)\b", text, re.I):
             return _ignore("Reply introduces an unsupported personal claim")
         supported = _content_words(source)

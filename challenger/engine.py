@@ -9,8 +9,9 @@ from typing import Protocol
 from .config import Settings
 from .groq_client import GroqBackoff, GroqConfigurationError
 from .models import Identity, Message
-from .selection import skip_reason, validate_decision
+from .selection import skip_reason, validate_decision, welcome_history_reason
 from .storage import Store
+from .discussions import choose_discussion
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ class Worker:
             try:
                 for message in await self.gateway.sync():
                     self.ingest(message)
+                self.store.set_state("last_sync", self.clock())
                 self.next_history_sync = self.clock() + 60
             except TelegramBackoff as exc:
                 return self._block_telegram(exc)
@@ -146,8 +148,10 @@ class Worker:
         batch = self.store.pending(self.clock(), self.settings.batch_size)
         context = self.store.context(self.clock())
         candidates = []
+        recent = self.recent_replies()
         for message in batch:
             reason = skip_reason(message, context, self.identity, self.clock(), self.settings.max_age)
+            reason = reason or welcome_history_reason(message, recent)
             if self.coordinator is not None:
                 if message.sender_id in self.coordinator.peer_ids():
                     reason = "Configured automated account"
@@ -160,7 +164,7 @@ class Worker:
             else:
                 candidates.append(message)
         if not candidates:
-            return self.settings.batch_delay
+            return await self.start_discussion()
         try:
             log.info("EVALUATING account=%s targets=%s", self.settings.account_id,
                      [m.message_id for m in candidates])
@@ -175,7 +179,8 @@ class Worker:
             raise
         decision = validate_decision(raw, candidates, context, self.identity,
                                      self.recent_replies(),
-                                     now=self.clock(), max_age=self.settings.max_age)
+                                     now=self.clock(), max_age=self.settings.max_age,
+                                     max_words=self.settings.max_reply_words)
         if decision.action != "REPLY":
             self.store.mark(candidates, "reviewed", decision.reason)
             log.info("IGNORE account=%s batch=%s remaining=%s/%s reason=%s", self.settings.account_id,
@@ -214,7 +219,8 @@ class Worker:
         reason = skip_reason(target, latest_context, self.identity, self.clock(), self.settings.max_age)
         decision = validate_decision(raw, candidates, latest_context, self.identity,
                                      self.recent_replies(),
-                                     now=self.clock(), max_age=self.settings.max_age)
+                                     now=self.clock(), max_age=self.settings.max_age,
+                                     max_words=self.settings.max_reply_words)
         if reason or decision.action != "REPLY":
             self.store.mark([target], "reviewed", reason or decision.reason)
             log.info("IGNORE target=%s after refresh reason=%s", target.message_id, reason or decision.reason)
@@ -244,16 +250,62 @@ class Worker:
             return max(self.settings.batch_delay, self.delay())
         self.store.mark([m for m in candidates if m.message_id != target.message_id],
                         "reviewed", "Batch already selected another target")
+        return await self.deliver(action_id, claim_id, reply, target.message_id)
+
+    async def start_discussion(self) -> float:
+        if not self.settings.discussion_topics or self.delay():
+            return self.settings.batch_delay
+        def choose():
+            peers = {self.identity.user_id}
+            if self.coordinator is not None:
+                peers |= self.coordinator.peer_ids()
+            return choose_discussion(self.settings, self.store.discussion_context(self.clock()),
+                                     self.store.export_actions(self.clock(), 1), self.recent_replies(), peers, self.clock())
+        decision = choose()
+        if decision.action != "START_DISCUSSION":
+            return self.settings.batch_delay
+        # A fresh history read catches manual sends and resumes in discussion.
+        try:
+            for message in await self.gateway.sync():
+                self.ingest(message)
+            self.store.set_state("last_sync", self.clock())
+        except TelegramBackoff as exc:
+            return self._block_telegram(exc)
+        except Exception:
+            self.store.set_block("telegram", self.clock() + 60)
+            return 60
+        decision = choose()
+        if self.delay() or decision.action != "START_DISCUSSION":
+            return max(self.settings.batch_delay, self.delay())
+        mode = "live" if self.settings.auto_send else "preview"
+        claim = None
+        if self.coordinator is not None:
+            # Shared quiet-episode claim prevents multiple accounts starting
+            # conversations at once. It is not a Telegram reply target.
+            latest = max(m.message_id for m in self.store.discussion_context(self.clock()))
+            claim = self.coordinator.reserve(self.settings.account_id, self.settings.chat_id,
+                                             -latest, decision.text, mode, self.clock(), "START_DISCUSSION")
+            if claim is None:
+                return self.settings.batch_delay
+        action = self.store.reserve_start(decision.text, mode, self.clock())
+        if action is None:
+            if claim is not None:
+                self.coordinator.finish(claim, "rejected", self.clock())
+            return self.settings.batch_delay
+        log.info("START_DISCUSSION account=%s reason=%s", self.settings.account_id, decision.reason)
+        return await self.deliver(action, claim, decision.text, None)
+
+    async def deliver(self, action_id, claim_id, reply, target_id):
         if not self.settings.auto_send:
             self.store.finish(action_id, "previewed", self.clock())
             if claim_id is not None:
                 self.coordinator.finish(claim_id, "previewed", self.clock())
             log.info("SIMULATED REPLY account=%s target=%s text=%s; preview quota reserved, nothing sent",
-                     self.settings.account_id, target.message_id, reply)
+                     self.settings.account_id, target_id, "[content kept locally]")
             self.log_quota("accepted simulated reply")
             return self.delay()
         try:
-            sent = await self.gateway.send(reply, target.message_id)
+            sent = await self.gateway.send(reply, target_id)
         except TelegramBackoff as exc:
             self.store.finish(action_id, "rejected", self.clock())
             if claim_id is not None:
@@ -271,7 +323,7 @@ class Worker:
         self.store.finish(action_id, "sent", max(self.clock(), sent.sent_at), sent.message_id)
         if claim_id is not None:
             self.coordinator.finish(claim_id, "sent", max(self.clock(), sent.sent_at), sent.message_id)
-        log.info("SENT REPLY target=%s telegram_id=%s", target.message_id, sent.message_id)
+        log.info("SENT MESSAGE target=%s telegram_id=%s", target_id, sent.message_id)
         self.log_quota("confirmed sent reply")
         return self.delay()
 

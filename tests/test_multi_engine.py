@@ -20,7 +20,7 @@ class Clock:
 
 
 class Decider:
-    def __init__(self, text="The meeting starts at eight tonight"):
+    def __init__(self, text="Meeting starts at eight tonight"):
         self.text = text
         self.calls = 0
         self.recent = []
@@ -99,7 +99,7 @@ class MultiEngineTests(unittest.IsolatedAsyncioTestCase):
 
     def add_meeting(self, target_id=2, chat_id=-100, at=None):
         at = self.clock() if at is None else at
-        self.add(Message(target_id - 1, chat_id, 99, "The meeting starts at eight tonight", at - 10))
+        self.add(Message(target_id - 1, chat_id, 99, "Meeting starts at eight tonight", at - 10))
         for worker in self.workers:
             if worker.settings.chat_id == chat_id:
                 worker.store.mark([worker.store.get(target_id - 1)], "reviewed", "Context-only fixture")
@@ -211,7 +211,7 @@ class MultiEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.second.store.status(4), "reviewed")
         self.assertFalse(self.coordinator.is_claimed(-100, 4))
         self.assertEqual(self.second.store.quota_wait(self.clock()), 0)
-        self.assertIn("The meeting starts at eight tonight", self.second.decider.recent)
+        self.assertIn("Meeting starts at eight tonight", self.second.decider.recent)
 
     async def test_live_targeting_is_correct_and_shared_budget_prevents_peer_send(self):
         self.first.settings = replace(self.first.settings, auto_send=True)
@@ -219,7 +219,7 @@ class MultiEngineTests(unittest.IsolatedAsyncioTestCase):
         self.add_meeting(target_id=8)
         await asyncio.gather(self.first.process_once(), self.second.process_once())
         sent = self.first.gateway.sent + self.second.gateway.sent
-        self.assertEqual(sent, [("The meeting starts at eight tonight", 8)])
+        self.assertEqual(sent, [("Meeting starts at eight tonight", 8)])
         self.assertEqual(len(self.coordinator.recent_replies(-100, self.clock())), 1)
 
     async def test_shared_history_order_keeps_newest_question_in_style_window(self):
@@ -284,7 +284,7 @@ class MultiEngineTests(unittest.IsolatedAsyncioTestCase):
         self.add_meeting()
 
         async def answered():
-            self.add(Message(3, -100, 77, "The meeting starts at eight tonight", self.clock() + 1,
+            self.add(Message(3, -100, 77, "Meeting starts at eight tonight", self.clock() + 1,
                              reply_to_id=2, reply_to_sender_id=88))
 
         self.first.decider.callback = answered
