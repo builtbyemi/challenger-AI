@@ -65,6 +65,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(self.coordinator.identity_for("two"), 22)
 
     def test_group_shared_five_per_hour_including_preview(self):
+        self.coordinator.window_mode = "rolling"  # Explicit legacy-mode coverage.
         for index in range(5):
             action = self.reserve(index, mode="preview" if index % 2 == 0 else "live")
             self.coordinator.finish(action, "preview" if index % 2 == 0 else "sent", self.now + index * 600)

@@ -269,7 +269,7 @@ class UpgradeAsyncTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     worker=Worker(settings,store,Identity(11),service,service,clock=lambda:11000)
                     await worker.process_once()
-                    self.assertEqual(store.quota_remaining(11000),4)
+                    self.assertEqual(store.quota_remaining(11000),5)  # New fixed UTC hour; duplicate still suppressed.
                     self.assertEqual(len(service.sent),int(live))
                 finally:store.close()
 

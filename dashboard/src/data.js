@@ -1,11 +1,20 @@
 export const pages = ['Overview', 'Accounts', 'Message Activity', 'Points & Analytics', 'Groq Usage', 'Errors & Logs', 'Settings']
 export function hourlyDisplay(data, now = Date.now()/1000) {
   if (!data) return data
-  return {...data, accounts:(data.accounts || []).map(a => a.window === 'fixed' && a.resets_at && now >= a.resets_at
-    ? {...a,total:null,manual:null,bot:null,preview:null,uncertain:null,remaining:null,reserved_total:null,awaiting_hour:true} : a)}
+  const start = Math.floor(now/3600)*3600
+  return {...data, accounts:(data.accounts || []).map(a => {
+    // Never relabel rolling/cached counts as the current fixed UTC hour. Derive
+    // the snapshot's hour from its timestamp, not a potentially stale reset label.
+    const capturedStart = Math.floor(data.generated_at/3600)*3600
+    const valid = a.window === 'fixed' && a.window_start === start && a.resets_at === start+3600
+      && capturedStart === start
+    return a.enabled && !valid
+      ? {...a,total:null,manual:null,bot:null,preview:null,uncertain:null,remaining:null,reserved_total:null,awaiting_hour:true}
+      : a
+  })}
 }
 export function resetLabel(account, now = Date.now()/1000) {
-  if (account.window !== 'fixed') return 'Rolling 60-minute window'
+  if (account.awaiting_hour) return 'Waiting for current UTC-hour snapshot'
   const next = (Math.floor(now/3600)+1)*3600
   const seconds = Math.max(0, Math.ceil(next-now))
   const time = new Date(next*1000).toISOString().slice(11,16)

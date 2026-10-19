@@ -43,7 +43,7 @@ class Coordinator:
     _locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
     def __init__(self, path: Path | str, max_actions: int = 5,
-                 window_mode: str = "rolling", timezone: str = "Africa/Lagos") -> None:
+                 window_mode: str = "fixed", timezone: str = "Africa/Lagos") -> None:
         self.path = str(path)
         self.max_actions = max(1, min(25, int(max_actions)))
         self.window_mode, self.timezone = window_mode, timezone

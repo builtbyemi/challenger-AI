@@ -35,6 +35,7 @@ class StorageTests(unittest.TestCase):
         return action
 
     def test_five_messages_in_rolling_hour(self):
+        self.store.window_mode = "rolling"  # Explicit legacy-mode coverage.
         for index in range(5):
             self.reserve(index + 1, self.now + index * 600)
         self.assertEqual(self.store.quota_wait(self.now + 3000), 600)
@@ -215,6 +216,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.status(1), "uncertain")
 
     def test_confirmation_extends_clock_and_never_moves_it_backwards(self):
+        self.store.window_mode = "rolling"
         for index in range(4):
             self.reserve(100 + index, self.now + 25)
         action = self.reserve(1, self.now)

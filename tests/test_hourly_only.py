@@ -63,10 +63,10 @@ class HourlyOnlyTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(live=live), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory)
                 service = Service()
-                store = Store(path / "account.sqlite3", "one", -100)
-                group = Coordinator(path / "group.sqlite3")
+                store = Store(path / "account.sqlite3", "one", -100, window_mode="rolling")
+                group = Coordinator(path / "group.sqlite3", window_mode="rolling")
                 group.register("one", 11)
-                settings = Settings(1, "fake", -100, "fake", "fake", account_id="one", auto_send=live)
+                settings = Settings(1, "fake", -100, "fake", "fake", account_id="one", auto_send=live, window_mode="rolling")
                 worker = Worker(settings, store, Identity(11), service, service,
                                 clock=lambda: service.now, coordinator=group)
 
@@ -98,8 +98,8 @@ class HourlyOnlyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(store.quota_wait(service.now), 3450)
                     store.close()
                     group.close()
-                    store = Store(path / "account.sqlite3", "one", -100)
-                    group = Coordinator(path / "group.sqlite3")
+                    store = Store(path / "account.sqlite3", "one", -100, window_mode="rolling")
+                    group = Coordinator(path / "group.sqlite3", window_mode="rolling")
                     worker.store, worker.coordinator = store, group
                     await worker.process_once()
                     self.assertEqual(service.calls, 5)

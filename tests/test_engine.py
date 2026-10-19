@@ -196,7 +196,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.decider.callback = manual
         await self.worker.process_once()
         self.assertEqual(self.store.status(1), "pending")
-        self.assertEqual(self.store.quota_wait(10000), 3590)
+        self.assertEqual(self.store.quota_wait(10000), 800)  # Next UTC hour.
 
     async def test_floodwait_full_duration_is_persistent(self):
         self.worker.settings = replace(self.settings, auto_send=True)

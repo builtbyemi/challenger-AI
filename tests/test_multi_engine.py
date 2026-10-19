@@ -173,6 +173,7 @@ class MultiEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.second.decider.calls, 0)
 
     async def test_group_five_message_cap_blocks_both_account_workers(self):
+        self.coordinator.window_mode = "rolling"  # This case exercises rolling expiry.
         history = ["First existing group preview", "Second existing group preview",
                    "Third existing group preview", "Fourth existing group preview",
                    "Fifth existing group preview"]

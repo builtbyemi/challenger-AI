@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def window_start(now: float, mode: str = "rolling", timezone: str = "Africa/Lagos") -> float:
+def window_start(now: float, mode: str = "fixed", timezone: str = "Africa/Lagos") -> float:
     if mode == "rolling":
         return now - 3600
     if mode != "fixed":

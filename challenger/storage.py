@@ -34,7 +34,7 @@ class Store:
         chat_id: int,
         max_actions: int = 5,
         max_age: int = 720,
-        window_mode: str = "rolling",
+        window_mode: str = "fixed",
         timezone: str = "Africa/Lagos",
     ) -> None:
         self.path = str(path)

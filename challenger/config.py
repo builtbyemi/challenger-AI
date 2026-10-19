@@ -28,7 +28,7 @@ class Settings:
     legacy_session_path: Path | None = None
     automation_disclosed: bool = False
     persona: str = "Casual Nigerian Pidgin, relaxed and funny; match the conversation's language"
-    window_mode: str = "rolling"
+    window_mode: str = "fixed"
     timezone: str = "Africa/Lagos"
     max_reply_words: int = 5
     quiet_seconds: int = 900

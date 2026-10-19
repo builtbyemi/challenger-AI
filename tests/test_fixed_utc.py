@@ -14,6 +14,53 @@ from challenger.windows import window_start
 
 
 class FixedUtcTests(unittest.TestCase):
+    def test_defaults_recalculate_0118_from_existing_history_for_every_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory)
+            group=Coordinator(base/'group.sqlite3',25)
+            try:
+                for slot in range(1,6):
+                    account=f'account_{slot}'
+                    group.register(account,slot)
+                    path=base/f'{slot}.sqlite3'
+                    store=Store(path,account,-1,window_mode='rolling')
+                    try:
+                        for index,at in enumerate((3500,3599.999,3600,4600)):
+                            msg=Message(slot*100+index,-1,slot,'Stored historical message',at,outgoing=True)
+                            store.observe_outgoing(msg)
+                            group.observe_outgoing(account,msg)
+                    finally:store.close()
+                    store=Store(path,account,-1)
+                    try:
+                        self.assertEqual(store.window_mode,'fixed')
+                        self.assertEqual(store.quota_remaining(4680),3)
+                        settings=Settings(1,'fake',-1,'fake','model',account_id=account,database_path=path)
+                        report=account_snapshot(settings,4680)
+                        self.assertEqual((report['total'],report['remaining'],report['window_start']),(2,3,3600))
+                        self.assertEqual(len(store.export_actions(4680)),4)
+                    finally:store.close()
+                self.assertEqual(group.quota_remaining(-1,4680),15)
+            finally:group.close()
+
+    def test_every_hour_boundary_over_two_days_excludes_previous_hour(self):
+        for hour in range(1,49):
+            start=hour*3600
+            store=Store(':memory:','account_1',-1)
+            group=Coordinator(':memory:',25)
+            group.register('account_1',1)
+            try:
+                for i in range(5):
+                    msg=Message(i+1,-1,1,'Stored text',start-0.001,outgoing=True)
+                    store.observe_outgoing(msg);group.observe_outgoing('account_1',msg)
+                self.assertEqual(store.quota_remaining(start-0.001),0)
+                self.assertEqual(store.quota_remaining(start),5)
+                self.assertEqual(group.quota_remaining(-1,start),25)
+                msg=Message(6,-1,1,'New hour message',start,outgoing=True)
+                store.observe_outgoing(msg);group.observe_outgoing('account_1',msg)
+                self.assertEqual(store.quota_remaining(start+1080),4)
+                self.assertEqual(group.quota_remaining(-1,start+1080),24)
+            finally:store.close();group.close()
+
     def test_fixed_boundary_ignores_reporting_timezone_including_fractional_offsets(self):
         for timezone in ('UTC','Africa/Lagos','Asia/Kathmandu','America/New_York'):
             self.assertEqual(window_start(3599.999,'fixed',timezone),0)
