@@ -11,7 +11,7 @@ from .groq_client import GroqBackoff, GroqConfigurationError
 from .models import Identity, Message
 from .selection import skip_reason, validate_decision, welcome_history_reason
 from .storage import Store
-from .discussions import choose_discussion
+from .discussions import choose_discussion, discussion_context, validate_starter
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +253,8 @@ class Worker:
         return await self.deliver(action_id, claim_id, reply, target.message_id)
 
     async def start_discussion(self) -> float:
+        if callable(getattr(self.decider,"start_discussion",None)):
+            return await self.generate_discussion()
         if not self.settings.discussion_topics or self.delay():
             return self.settings.batch_delay
         def choose():
@@ -294,6 +296,63 @@ class Worker:
             return self.settings.batch_delay
         log.info("START_DISCUSSION account=%s reason=%s", self.settings.account_id, decision.reason)
         return await self.deliver(action, claim, decision.text, None)
+
+    async def generate_discussion(self) -> float:
+        if self.delay():
+            return max(self.settings.batch_delay,self.delay())
+        peers={self.identity.user_id}
+        if self.coordinator is not None:
+            peers |= self.coordinator.peer_ids()
+        def context():
+            return discussion_context(self.settings,self.store.discussion_context(self.clock()),
+                self.store.export_actions(self.clock(),1),peers,self.clock())
+        human=context()
+        if not human:
+            return self.settings.batch_delay
+        episode=str(human[-1].message_id)
+        claim_target=-human[-1].message_id
+        if (self.store.get_state('starter_attempt')==episode or self.coordinator is not None
+                and self.coordinator.is_claimed(self.settings.chat_id,claim_target)):
+            return self.settings.batch_delay
+        # A persisted attempt bound prevents repeated AI requests for unchanged
+        # quiet context, including IGNORE and invalid output across restarts.
+        self.store.set_state('starter_attempt',episode)
+        try:
+            for message in await self.gateway.sync():self.ingest(message)
+            human=context()
+            if not human or str(human[-1].message_id)!=episode or self.delay():
+                return self.settings.batch_delay
+            raw=await self.decider.start_discussion(human,self.recent_replies())
+            # Arrivals remain queued during inference. Re-read before reserving.
+            for message in await self.gateway.sync():self.ingest(message)
+            fresh=context()
+            if not fresh or str(fresh[-1].message_id)!=episode or self.delay():
+                return max(self.settings.batch_delay,self.delay())
+        except GroqBackoff as exc:
+            self.store.set_block('groq',self.clock()+exc.seconds)
+            return exc.seconds
+        except TelegramBackoff as exc:
+            return self._block_telegram(exc)
+        except GroqConfigurationError:
+            raise
+        except Exception:
+            self.store.set_block('telegram',self.clock()+60)
+            return 60
+        decision=validate_starter(raw,fresh,self.recent_replies())
+        if decision.action!='START_DISCUSSION':
+            log.info('STARTER ignored account=%s reason=%s',self.settings.account_id,decision.reason)
+            return self.settings.batch_delay
+        mode='live' if self.settings.auto_send else 'preview'
+        claim=None
+        if self.coordinator is not None:
+            claim=self.coordinator.reserve(self.settings.account_id,self.settings.chat_id,
+                claim_target,decision.text,mode,self.clock(),'START_DISCUSSION')
+            if claim is None:return self.settings.batch_delay
+        action=self.store.reserve_start(decision.text,mode,self.clock())
+        if action is None:
+            if claim is not None:self.coordinator.finish(claim,'rejected',self.clock())
+            return self.settings.batch_delay
+        return await self.deliver(action,claim,decision.text,None)
 
     async def deliver(self, action_id, claim_id, reply, target_id):
         if not self.settings.auto_send:

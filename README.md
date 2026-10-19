@@ -2,7 +2,7 @@
 
 This is the existing project, upgraded in place. `telegram_challenger_v07.py` remains a compatible entry point. Account 1's session and SQLite history are retained. The folder is now `C:\Users\EMMANUEL\Desktop\Challenger Ai`.
 
-The worker supports five separately authenticated accounts, optional relevant discussion starters, persistent manual/automated message budgets, and a private React dashboard. Five messages per account is a ceiling, never a posting target. No generated filler is used to reach a quota.
+The worker supports five separately authenticated accounts, optional relevant discussion starters, persistent manual/automated message budgets, and a private React dashboard. Five qualifying messages per account is an aspirational hourly target; five total sends remains the hard ceiling. No generated filler is used to reach a quota.
 
 Supabase uploads failing with `Telemetry upload deferred`: see [the telemetry repair guide](TELEMETRY_FIX.md) for the verified causes, administrator SQL repair and `python main.py --telemetry-check`.
 
@@ -81,14 +81,11 @@ Accounts use distinct style preferences: relaxed Nigerian Pidgin; friendly Engli
 
 Plain text welcome announcements may receive an occasional short welcome. They are skipped when another member already greeted the arrival or a welcome appears among the last five recorded replies. Native join service events without a text welcome are not supported.
 
-`START_DISCUSSION` is optional and uses curated, context-matched topics without extra Groq requests. Set semicolon-separated 3–5 word questions appropriate to the group, for example:
+Quiet-group starters now use Groq to compose fresh 4?10 word questions from recent human conversation and previous replies. `QUIET_PERIOD_SECONDS` (default 900) controls quietness, not the gap between ordinary replies. Relevant topics include crypto, meme coins, Bitcoin, WW3 Token, markets, relevant politics, Trump and world events. Topics must be supported by recent community context; there is no external news verification feed.
 
-```dotenv
-QUIET_PERIOD_SECONDS=900
-DISCUSSION_TOPICS=What makes transfers reliable?;Which fees affect transfers?
-```
+Before and after generation, the worker refreshes history and checks quietness, allowance and human participation. Persistent attempts bound generation to once per account per human discussion episode; a shared claim prevents multiple controlled accounts starting the same episode. An unanswered starter waits for human participation. Existing `DISCUSSION_TOPICS` is retained for compatibility with custom legacy deciders; production workers generate original questions instead of using that list. Silence or unused allowance alone never creates activity.
 
-A topic must overlap recent human conversation. The group must be quiet, allowance must remain, the topic must not repeat recent contributions, and an unanswered previous starter cannot trigger another. A shared quiet-episode claim prevents all accounts starting at once. Empty `DISCUSSION_TOPICS` disables starters. Silence or unused allowance alone never creates activity.
+Dashboard progress counts confirmed sent messages containing at least four words, recalculated from existing SQLite text and timestamps within the current UTC hour. It includes observed manual messages. Short messages still consume sending allowance but do not advance qualified progress. Preview and uncertain/pending sends consume allowance conservatively without qualifying. The dashboard shows qualified progress, total confirmed sends, remaining allowance, account status and next UTC reset. A short send may make 5/5 qualified progress impossible that hour; the limit is never raised to compensate. Raw message text is not published in telemetry.
 
 ## Groq budgets
 

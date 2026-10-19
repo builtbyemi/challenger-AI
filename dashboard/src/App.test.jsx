@@ -32,3 +32,17 @@ it('shows safe sync errors without rendering Supabase exception contents',async(
 })
 it('shows setup without exposing fabricated data',()=>{render(<App client={null}/>);expect(screen.getByText('Connect your workspace')).toBeInTheDocument();fireEvent.click(screen.getByText(/View empty dashboard/));expect(screen.getByText(/No messages or points are assumed/)).toBeInTheDocument();expect(screen.getByRole('heading',{name:'Account 5'})).toBeInTheDocument()})
 it('navigates all pages and switches themes without a connection',()=>{render(<App client={null}/>);fireEvent.click(screen.getByText(/View empty dashboard/));for(const page of ['Accounts','Message Activity','Points & Analytics','Groq Usage','Errors & Logs','Settings']){fireEvent.click(screen.getByRole('button',{name:page,exact:true}));expect(screen.getByRole('heading',{name:page,level:1})).toBeInTheDocument()}fireEvent.click(screen.getByLabelText('Toggle theme'));expect(document.documentElement.dataset.theme).toBe('light')})
+
+it('displays qualifying progress separately from confirmed sends and allowance',async()=>{
+  const now=Date.now()/1000, start=Math.floor(now/3600)*3600
+  render(<App client={fakeClient({version:1,generated_at:now,accounts:[{
+    account_id:'account_1',enabled:true,health:'connected',window:'fixed',window_start:start,resets_at:start+3600,
+    qualified:2,total:4,remaining:1,today:4,events:[]
+  }]})}/> )
+  const sent = await screen.findByText('4 sent / 4+ words qualify')
+  expect(sent).toBeInTheDocument()
+  const card = sent.closest('.account-card')
+  expect(card.querySelector('.allowance strong')).toHaveTextContent('2 / 5')
+  expect(card).toHaveTextContent('1 available')
+  expect(screen.getAllByText('qualified this UTC hour').length).toBeGreaterThan(0)
+})

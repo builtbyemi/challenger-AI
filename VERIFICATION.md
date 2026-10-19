@@ -36,3 +36,12 @@ Remaining external setup:
 5. Optional discussion starters need suitable `DISCUSSION_TOPICS`. They are disabled when the list is empty; unused allowance never forces activity.
 
 Normal configuration may use `AUTO_SEND=true`; explicit `--preview` forces all five accounts to `auto_send=False` before validation or initialization. Existing credentials, sessions and database history were retained. See `STARTUP_FIX.md` for the confirmed running-instance lock conflict and safe restart instructions. Setup/start/login/deploy commands are in `README.md` and `DEPLOYMENT.md`. A hosted end-to-end smoke test remains necessary after external setup, using preview mode without live Telegram sends.
+
+
+## Qualified progress and generated starters (2026-10-19)
+
+- Python: 285 tests run, 284 passed and 1 skipped. Frontend: all 19 tests passed.
+- New regressions exercise four-word qualification, preview/uncertain allowance separation, historical timestamp recalculation and restart persistence, independent account caps, shared starter claims, arrivals during inference, repeated/unsupported questions, and mocked Groq structured output for starters.
+- Dashboard tests verify 2/5 qualifying messages alongside four actual sends and one remaining slot, and discard previous-hour qualified counters at the UTC boundary.
+- No real Telegram messages or live Groq requests were used for this verification. Live generated wording, dialect quality and factual accuracy remain unverified; context filtering cannot guarantee them. Five qualifying messages is never guaranteed or forced.
+- Existing sessions, databases, credentials and account settings were not reset. No SQL migration is required; qualification is derived from existing local message records and published via the existing snapshot payload.

@@ -9,7 +9,7 @@ export function hourlyDisplay(data, now = Date.now()/1000) {
     const valid = a.window === 'fixed' && a.window_start === start && a.resets_at === start+3600
       && capturedStart === start
     return a.enabled && !valid
-      ? {...a,total:null,manual:null,bot:null,preview:null,uncertain:null,remaining:null,reserved_total:null,awaiting_hour:true}
+      ? {...a,total:null,qualified:null,qualified_remaining:null,manual:null,bot:null,preview:null,uncertain:null,remaining:null,reserved_total:null,awaiting_hour:true}
       : a
   })}
 }

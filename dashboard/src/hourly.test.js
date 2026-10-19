@@ -9,10 +9,12 @@ it('shows UTC reset independent of browser timezone and restarts countdown on th
 })
 it('does not carry a partial or full old count into the new UTC hour or invent fresh availability',()=>{
   for(const total of [2,5]) {
-    const data={generated_at:3599,accounts:[{enabled:true,window:'fixed',window_start:0,resets_at:3600,total,remaining:5-total,today:total}]}
+    const data={generated_at:3599,accounts:[{enabled:true,window:'fixed',window_start:0,resets_at:3600,total,qualified:total,qualified_remaining:5-total,remaining:5-total,today:total}]}
     expect(hourlyDisplay(data,3599).accounts[0].total).toBe(total)
     const expired=hourlyDisplay(data,3600)
     expect(expired.accounts[0].total).toBeNull()
+    expect(expired.accounts[0].qualified).toBeNull()
+    expect(expired.accounts[0].qualified_remaining).toBeNull()
     expect(expired.accounts[0].awaiting_hour).toBe(true)
     expect(expired.accounts[0].today).toBe(total)
     expect(summarize(expired).remaining).toBeNull()

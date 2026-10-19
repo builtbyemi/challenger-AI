@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from .config import PERSONAS
 from .windows import window_start, day_start
+from .selection import _words
 
 
 def read_db(path):
@@ -30,7 +31,7 @@ def rows(db, sql, args=()):
 def account_snapshot(settings, now):
     db = read_db(settings.database_path)
     try:
-        actions = rows(db, "SELECT id,activity_at,status,mode,kind,telegram_id,source_id FROM tc_actions WHERE account_id=? AND activity_at>=?",
+        actions = rows(db, "SELECT id,text,activity_at,status,mode,kind,telegram_id,source_id FROM tc_actions WHERE account_id=? AND activity_at>=?",
                        (settings.account_id, now - 31 * 86400))
         metadata = {r["key"].split(":", 1)[-1]: r["value"] for r in rows(
             db, "SELECT key,value FROM tc_metadata WHERE key LIKE ?", (settings.account_id + ":%",))}
@@ -46,6 +47,9 @@ def account_snapshot(settings, now):
     sent = [a for a in actions if a["status"] == "sent" and a["telegram_id"] is not None]
     manual = sum(a["mode"] == "observed" and a in sent for a in current)
     bot = sum(a["mode"] == "live" and a in sent for a in current)
+    # Qualification is display-only. Every send/reservation still consumes its
+    # normal allowance, including short messages and uncertain outcomes.
+    qualified = sum(a in sent and len(_words(a["text"])) >= 4 for a in current)
     preview = sum(a["mode"] == "preview" for a in current)
     remaining = max(0, settings.max_actions - len(current))
     boundary = (sorted((a["activity_at"] for a in current), reverse=True)[settings.max_actions - 1] + 3600
@@ -66,10 +70,13 @@ def account_snapshot(settings, now):
     events = [{"id": f"{settings.account_id}:{a['id']}", "account_id": settings.account_id,
                "at": a["activity_at"], "status": a["status"], "kind": a["kind"],
                "origin": "manual" if a["mode"] == "observed" else a["mode"],
-               "has_reply_target": a["source_id"] is not None}
+               "has_reply_target": a["source_id"] is not None,
+               "qualified": a["status"] == "sent" and a["telegram_id"] is not None and len(_words(a["text"])) >= 4}
               for a in sorted(actions, key=lambda a: a["activity_at"], reverse=True)[:100]]
     return dict(account_id=settings.account_id, enabled=True, persona=settings.persona,
                 hourly_limit=settings.max_actions,
+                qualified=qualified, qualified_target=5,
+                qualified_remaining=max(0,5-qualified),
                 window_start=start if settings.window_mode == "fixed" else None,
                 resets_at=start + 3600 if settings.window_mode == "fixed" else None,
                 health=health, mode="live" if settings.auto_send else "preview", window=settings.window_mode,
