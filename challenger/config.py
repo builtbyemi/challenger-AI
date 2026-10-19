@@ -59,7 +59,7 @@ PERSONAS = (
 
 
 def _window_mode() -> str:
-    mode = os.getenv("HOURLY_WINDOW_MODE", "rolling").strip().lower()
+    mode = os.getenv("HOURLY_WINDOW_MODE", "fixed").strip().lower()
     if mode not in {"rolling", "fixed"}:
         raise ValueError("HOURLY_WINDOW_MODE must be rolling or fixed")
     return mode

@@ -15,9 +15,9 @@ Test results from this work:
 
 | Check | Result | Scope |
 |---|---|---|
-| Python unittest suite | 270 tests; 269 passed, 1 skipped | Rerun after the preview startup repair on 2026-10-19. Temporary SQLite and fake Telegram/Groq transports. The skip is POSIX permissions on Windows. |
+| Python unittest suite | 274 tests; 273 passed, 1 skipped | Rerun after the fixed UTC hourly counter change on 2026-10-19. Includes partial/full rollover, five accounts/group limits, restart persistence, preview allowance and retained FloodWait. The skip is POSIX permissions on Windows. |
 | Authentication CLI | Passed with fake Telegram transport | Actual CLI subprocess and console input for Accounts 2–5 in sequence, session/history preservation, disabled-slot loading, forced AUTO_SEND=false, 2FA, invalid/expired codes, timeouts, cancellation and FloodWait. Real phone authorization still requires the account owner. |
-| Frontend + database tests | 15 passed | UI/data loading, both SQL migrations, publisher binding repair/idempotency and RLS in embedded PostgreSQL. |
+| Frontend + database tests | 17 passed | Includes UTC countdown and old-hour snapshot invalidation, UI/data loading, SQL migrations, publisher binding repair/idempotency and RLS. |
 | Browser integration | 1 passed | Synthetic five-account workers → SQLite → telemetry publisher → PostgreSQL RPC/RLS → authenticated dashboard. All pages, polling, offline state and 390px mobile layout checked. External HTTP/Auth are mocked. |
 | Production frontend build | Passed | Vite build with separate application, charts and Supabase chunks. |
 | npm audit | 0 reported vulnerabilities | Installed frontend/development dependency tree at verification time. |

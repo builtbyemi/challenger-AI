@@ -1,4 +1,16 @@
 export const pages = ['Overview', 'Accounts', 'Message Activity', 'Points & Analytics', 'Groq Usage', 'Errors & Logs', 'Settings']
+export function hourlyDisplay(data, now = Date.now()/1000) {
+  if (!data) return data
+  return {...data, accounts:(data.accounts || []).map(a => a.window === 'fixed' && a.resets_at && now >= a.resets_at
+    ? {...a,total:null,manual:null,bot:null,preview:null,uncertain:null,remaining:null,reserved_total:null,awaiting_hour:true} : a)}
+}
+export function resetLabel(account, now = Date.now()/1000) {
+  if (account.window !== 'fixed') return 'Rolling 60-minute window'
+  const next = (Math.floor(now/3600)+1)*3600
+  const seconds = Math.max(0, Math.ceil(next-now))
+  const time = new Date(next*1000).toISOString().slice(11,16)
+  return `Resets ${time} UTC · ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`
+}
 export async function loadDashboardSnapshot(client, ownerId) {
   const {data, error} = await client.from('dashboard_snapshots').select('payload,received_at')
     .eq('owner_id', ownerId).order('received_at', {ascending:false}).limit(1).maybeSingle()
@@ -19,7 +31,7 @@ export function summarize(data) {
     connected: accounts.filter(a => a.health === 'connected').length,
     today: accounts.reduce((n, a) => n + (a.today || 0), 0),
     total: accounts.reduce((n, a) => n + (a.total || 0), 0),
-    remaining: accounts.reduce((n, a) => n + (a.remaining || 0), 0),
+    remaining: accounts.some(a=>a.awaiting_hour) ? null : accounts.reduce((n, a) => n + (a.remaining || 0), 0),
     verified: accounts.some(a => a.verified_today != null) ? accounts.reduce((n, a) => n + (a.verified_today || 0), 0) : null,
     events: accounts.flatMap(a => a.events || []).sort((a,b) => b.at - a.at),
   }

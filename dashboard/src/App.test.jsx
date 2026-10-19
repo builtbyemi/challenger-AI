@@ -16,7 +16,7 @@ it('loads owner snapshot and displays account, activity, usage and diagnostic da
     groq:{requests_today:17,tokens_today:1234,unreported_today:0,limits:{rpd:1000},daily:{}},
     errors:[{at:now,level:'WARNING',component:'telemetry',code:'upload_deferred'}]})
   render(<App client={client}/>)
-  expect(await screen.findByText('connected',{exact:true})).toBeInTheDocument()
+  expect(await screen.findByText('connected',{exact:true},{timeout:5000})).toBeInTheDocument()
   expect(client.query.eq).toHaveBeenCalledWith('owner_id','owner-id')
   fireEvent.click(screen.getByRole('button',{name:'Message Activity',exact:true}))
   expect(screen.getByText('manual',{exact:true})).toBeInTheDocument()

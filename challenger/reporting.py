@@ -69,6 +69,9 @@ def account_snapshot(settings, now):
                "has_reply_target": a["source_id"] is not None}
               for a in sorted(actions, key=lambda a: a["activity_at"], reverse=True)[:100]]
     return dict(account_id=settings.account_id, enabled=True, persona=settings.persona,
+                hourly_limit=settings.max_actions,
+                window_start=start if settings.window_mode == "fixed" else None,
+                resets_at=start + 3600 if settings.window_mode == "fixed" else None,
                 health=health, mode="live" if settings.auto_send else "preview", window=settings.window_mode,
                 manual=manual, bot=bot, preview=preview, uncertain=max(0, len(current) - manual - bot - preview),
                 total=manual + bot, reserved_total=len(current), remaining=remaining,
@@ -105,6 +108,7 @@ def snapshot(app, now=None):
         account['errors'] = [e for e in errors if e.get('account_id') == account['account_id']]
         account['reconnects'] = sum(e['code'] == 'reconnecting' for e in account['errors'])
     return dict(version=1, generated_at=now, timezone=app.accounts[0].timezone,
+                hourly_window=app.accounts[0].window_mode, hourly_timezone="UTC",
                 accounts=sorted(accounts, key=lambda a: a["account_id"]), theoretical_daily=600,
                 group_cap=app.group_max_actions, scoring_window_confirmed=False,
                 groq=dict(requests_today=sum(u["at"] >= today for u in usage),

@@ -63,7 +63,10 @@ it('administrator repair corrects a wrong publisher UUID and is idempotent witho
   const before=(await db.query('select count(*)::int as n from public.dashboard_snapshots')).rows[0].n
   await db.query("update challenger_private.worker_bindings set worker_user_id=$1,worker_id='local-worker' where worker_user_id=$2",[outsider,worker])
   const repair=readFileSync(fileURLToPath(new URL('../../supabase/repair_worker_binding.sql',import.meta.url)),'utf8')
-    .replace('REPLACE_WITH_WORKER_LOGIN_EMAIL','worker@example.test').replace('REPLACE_WITH_DASHBOARD_OWNER_EMAIL','owner@example.test')
+    // Operators may have filled in this local repair script. Tests must always
+    // use synthetic users without reading or publishing those configured values.
+    .replace(/v_worker_email text := '[^']*'/,"v_worker_email text := 'worker@example.test'")
+    .replace(/v_owner_email text := '[^']*'/,"v_owner_email text := 'owner@example.test'")
   await db.exec(repair)
   await db.exec(repair)
   expect((await db.query('select worker_user_id from challenger_private.worker_bindings')).rows).toEqual([{worker_user_id:worker}])
